@@ -1,0 +1,22 @@
+# Secrets (NEVER commit these)
+.streamlit/secrets.toml
+
+# Output files
+*_FIXED.pptx
+*_FIXED.json
+*_audit_report.html
+*_audit_data.json
+*_images/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test data (too large for GitHub)
+Powerpoints/
