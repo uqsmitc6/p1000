@@ -228,102 +228,20 @@ with tab1:
                 # Save fixed file to buffer
                 output_buffer = io.BytesIO()
                 prs.save(output_buffer)
-                output_buffer.seek(0)
+                output_bytes = output_buffer.getvalue()
 
                 report = fixer.generate_report()
                 total = report["total_changes"]
+                num_slides = len(prs.slides)
 
-                # ── Summary stats ──
-                st.markdown("---")
-                st.markdown("### Results")
-
-                if total == 0:
-                    st.success(
-                        "No changes needed — this deck is already brand-compliant!",
-                        icon="✅",
-                    )
-                else:
-                    stats = report["summary"]
-                    cols = st.columns(7)
-                    stat_items = [
-                        ("Font fixes", stats.get("font", 0), "#4085C6"),
-                        ("Colour fixes", stats.get("colour", 0), "#51247A"),
-                        ("Flagged", stats.get("colour_flagged", 0), "#D97706"),
-                        ("Tables", stats.get("table", 0), "#16A34A"),
-                        ("Footers", stats.get("footer", 0), "#962A8B"),
-                        ("Headings", stats.get("heading_size", 0), "#E62645"),
-                        ("Bullets", stats.get("bullet", 0), "#FBB800"),
-                    ]
-                    for col, (label, count, colour) in zip(cols, stat_items):
-                        col.markdown(
-                            f"<div class='stat-card'>"
-                            f"<div class='number' style='color:{colour};'>{count}</div>"
-                            f"<div class='label'>{label}</div></div>",
-                            unsafe_allow_html=True,
-                        )
-
-                    st.markdown(f"**{total} total changes** across {len(prs.slides)} slides")
-
-                    # ── Download button ──
-                    fixed_name = uploaded_file.name.replace(".pptx", "_FIXED.pptx")
-                    st.download_button(
-                        label=f"Download {fixed_name}",
-                        data=output_buffer,
-                        file_name=fixed_name,
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                        type="primary",
-                    )
-
-                    # ── Flagged items (show first — these need attention) ──
-                    flagged = [
-                        c for c in report["changes"]
-                        if c["category"] == "colour_flagged"
-                    ]
-                    if flagged:
-                        with st.expander(
-                            f"⚠️  {len(flagged)} colours flagged for review",
-                            expanded=True,
-                        ):
-                            st.markdown(
-                                "These non-UQ colours were **not auto-corrected** "
-                                "because they may be intentional accent colours. "
-                                "Please check these slides and decide whether to "
-                                "keep or change them:"
-                            )
-                            # Deduplicate by colour + slide for cleaner display
-                            seen = set()
-                            for c in flagged:
-                                key = (c["slide"], c["detail"])
-                                if key not in seen:
-                                    seen.add(key)
-                                    st.markdown(
-                                        f"<div class='change-item change-colour_flagged'>"
-                                        f"Slide {c['slide']}: {c['detail']}</div>",
-                                        unsafe_allow_html=True,
-                                    )
-
-                    # ── Detailed changes (collapsed) ──
-                    if report["changes"]:
-                        with st.expander(
-                            f"View all {total} changes", expanded=False
-                        ):
-                            by_slide = defaultdict(list)
-                            for change in report["changes"]:
-                                by_slide[change["slide"]].append(change)
-
-                            for slide_num in sorted(by_slide.keys()):
-                                changes = by_slide[slide_num]
-                                st.markdown(
-                                    f"**Slide {slide_num}** "
-                                    f"({len(changes)} change{'s' if len(changes) != 1 else ''})"
-                                )
-                                for c in changes:
-                                    cat = c["category"]
-                                    st.markdown(
-                                        f"<div class='change-item change-{cat}'>"
-                                        f"{c['detail']}</div>",
-                                        unsafe_allow_html=True,
-                                    )
+                # Store results in session state so they survive reruns
+                st.session_state["brand_result"] = {
+                    "output_bytes": output_bytes,
+                    "report": report,
+                    "total": total,
+                    "num_slides": num_slides,
+                    "fixed_name": uploaded_file.name.replace(".pptx", "_FIXED.pptx"),
+                }
 
             except Exception as e:
                 st.error(f"Something went wrong: {e}")
@@ -335,6 +253,102 @@ with tab1:
                     os.unlink(tmp_path)
                 except Exception:
                     pass
+
+        # ── Display results from session state (persists across reruns) ──
+        if "brand_result" in st.session_state:
+            result = st.session_state["brand_result"]
+            report = result["report"]
+            total = result["total"]
+
+            st.markdown("---")
+            st.markdown("### Results")
+
+            if total == 0:
+                st.success(
+                    "No changes needed — this deck is already brand-compliant!",
+                    icon="✅",
+                )
+            else:
+                stats = report["summary"]
+                cols = st.columns(7)
+                stat_items = [
+                    ("Font fixes", stats.get("font", 0), "#4085C6"),
+                    ("Colour fixes", stats.get("colour", 0), "#51247A"),
+                    ("Flagged", stats.get("colour_flagged", 0), "#D97706"),
+                    ("Tables", stats.get("table", 0), "#16A34A"),
+                    ("Footers", stats.get("footer", 0), "#962A8B"),
+                    ("Headings", stats.get("heading_size", 0), "#E62645"),
+                    ("Bullets", stats.get("bullet", 0), "#FBB800"),
+                ]
+                for col, (label, count, colour) in zip(cols, stat_items):
+                    col.markdown(
+                        f"<div class='stat-card'>"
+                        f"<div class='number' style='color:{colour};'>{count}</div>"
+                        f"<div class='label'>{label}</div></div>",
+                        unsafe_allow_html=True,
+                    )
+
+                st.markdown(f"**{total} total changes** across {result['num_slides']} slides")
+
+                # ── Download button ──
+                st.download_button(
+                    label=f"Download {result['fixed_name']}",
+                    data=result["output_bytes"],
+                    file_name=result["fixed_name"],
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    type="primary",
+                )
+
+                # ── Flagged items (show first — these need attention) ──
+                flagged = [
+                    c for c in report["changes"]
+                    if c["category"] == "colour_flagged"
+                ]
+                if flagged:
+                    with st.expander(
+                        f"⚠️  {len(flagged)} colours flagged for review",
+                        expanded=True,
+                    ):
+                        st.markdown(
+                            "These non-UQ colours were **not auto-corrected** "
+                            "because they may be intentional accent colours. "
+                            "Please check these slides and decide whether to "
+                            "keep or change them:"
+                        )
+                        # Deduplicate by colour + slide for cleaner display
+                        seen = set()
+                        for c in flagged:
+                            key = (c["slide"], c["detail"])
+                            if key not in seen:
+                                seen.add(key)
+                                st.markdown(
+                                    f"<div class='change-item change-colour_flagged'>"
+                                    f"Slide {c['slide']}: {c['detail']}</div>",
+                                    unsafe_allow_html=True,
+                                )
+
+                # ── Detailed changes (collapsed) ──
+                if report["changes"]:
+                    with st.expander(
+                        f"View all {total} changes", expanded=False
+                    ):
+                        by_slide = defaultdict(list)
+                        for change in report["changes"]:
+                            by_slide[change["slide"]].append(change)
+
+                        for slide_num in sorted(by_slide.keys()):
+                            changes = by_slide[slide_num]
+                            st.markdown(
+                                f"**Slide {slide_num}** "
+                                f"({len(changes)} change{'s' if len(changes) != 1 else ''})"
+                            )
+                            for c in changes:
+                                cat = c["category"]
+                                st.markdown(
+                                    f"<div class='change-item change-{cat}'>"
+                                    f"{c['detail']}</div>",
+                                    unsafe_allow_html=True,
+                                )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -410,35 +424,17 @@ with tab2:
                     st.info("No images found in this presentation.")
                     st.stop()
 
-                st.success(f"Found **{len(images)}** unique images across {len(set(i['slide_number'] for i in images))} slides")
+                num_unique_slides = len(set(i['slide_number'] for i in images))
 
                 # ── Extract-only mode ──
                 if extract_only:
-                    st.markdown("---")
-                    st.markdown("### Extracted Images")
-                    st.caption("Showing all images found in the deck. Run with AI classification to get risk ratings.")
-
-                    for img_info in images:
-                        col1, col2 = st.columns([1, 3])
-                        with col1:
-                            try:
-                                from PIL import Image as PILImage
-                                pil_img = PILImage.open(io.BytesIO(img_info["image_bytes"]))
-                                st.image(pil_img, width=180)
-                            except Exception:
-                                st.caption("*(preview unavailable)*")
-                        with col2:
-                            st.markdown(
-                                f"**Slide {img_info['slide_number']}** — "
-                                f"`{img_info['filename']}`"
-                            )
-                            st.caption(
-                                f"{img_info['width']}×{img_info['height']}px "
-                                f"  |  {img_info['content_type']}"
-                            )
-                            if img_info.get("slide_title"):
-                                st.caption(f"Slide title: {img_info['slide_title']}")
-                        st.markdown("---")
+                    # Store in session state
+                    st.session_state["audit_result"] = {
+                        "mode": "extract_only",
+                        "images": images,
+                        "num_unique_slides": num_unique_slides,
+                        "source_name": audit_file.name,
+                    }
 
                 # ── Full AI classification ──
                 else:
@@ -467,50 +463,8 @@ with tab2:
 
                     progress.progress(1.0)
                     status_text.empty()
-                    st.success("Classification complete!")
 
-                    # ── Risk Summary ──
-                    risk_counts = defaultdict(int)
-                    for cls in classifications:
-                        if "error" not in cls:
-                            risk_counts[cls.get("risk_level", "UNKNOWN")] += 1
-
-                    st.markdown("### Risk Summary")
-
-                    risk_items = [
-                        ("Critical", risk_counts.get("CRITICAL", 0), "critical", "#DC2626"),
-                        ("High", risk_counts.get("HIGH", 0), "high", "#EA580C"),
-                        ("Medium", risk_counts.get("MEDIUM", 0), "medium", "#D97706"),
-                        ("Low", risk_counts.get("LOW", 0), "low", "#16A34A"),
-                        ("Clear", risk_counts.get("CLEAR", 0), "clear", "#059669"),
-                    ]
-
-                    cols = st.columns(5)
-                    for col, (label, count, cls_name, colour) in zip(cols, risk_items):
-                        col.markdown(
-                            f"<div class='stat-card'>"
-                            f"<div class='number' style='color:{colour};'>{count}</div>"
-                            f"<div class='label'>{label}</div></div>",
-                            unsafe_allow_html=True,
-                        )
-
-                    # Key message based on results
-                    critical_high = risk_counts.get("CRITICAL", 0) + risk_counts.get("HIGH", 0)
-                    if critical_high > 0:
-                        st.warning(
-                            f"**{critical_high} image{'s' if critical_high != 1 else ''} "
-                            f"flagged as Critical or High risk** — "
-                            f"these likely need replacement or licence verification.",
-                            icon="⚠️",
-                        )
-
-                    # ── Downloads ──
-                    st.markdown("---")
-                    st.markdown("### Download Report")
-
-                    dl_col1, dl_col2 = st.columns(2)
-
-                    # Generate HTML report
+                    # Generate HTML report while images are still in temp dir
                     with tempfile.TemporaryDirectory() as report_dir:
                         for img_info in images:
                             img_path = Path(report_dir) / "images" / img_info["filename"]
@@ -518,137 +472,49 @@ with tab2:
                             img_path.write_bytes(img_info["image_bytes"])
 
                         report_path = Path(report_dir) / "report.html"
-
                         images_clean = []
                         for img in images:
                             images_clean.append(
                                 {k: v for k, v in img.items() if k != "image_bytes"}
                             )
-
-                        summary = generate_html_report(
+                        generate_html_report(
                             images_clean, classifications,
                             audit_file.name, str(report_path), "images",
                         )
-
                         html_content = report_path.read_text()
 
-                    with dl_col1:
-                        report_name = audit_file.name.replace(".pptx", "_audit_report.html")
-                        st.download_button(
-                            label="Download HTML Report",
-                            data=html_content,
-                            file_name=report_name,
-                            mime="text/html",
-                            type="primary",
-                        )
+                    # Build JSON data
+                    risk_counts = defaultdict(int)
+                    for cls in classifications:
+                        if "error" not in cls:
+                            risk_counts[cls.get("risk_level", "UNKNOWN")] += 1
 
-                    with dl_col2:
-                        json_data = {
-                            "metadata": {
-                                "input_file": audit_file.name,
-                                "total_images": len(images),
-                            },
-                            "summary": {"risk_counts": dict(risk_counts)},
-                            "images": [
-                                {
-                                    **{k: v for k, v in img.items() if k != "image_bytes"},
-                                    **cls,
-                                }
-                                for img, cls in zip(images, classifications)
-                            ],
-                        }
-                        json_name = audit_file.name.replace(".pptx", "_audit_data.json")
-                        st.download_button(
-                            label="Download JSON Data",
-                            data=json.dumps(json_data, indent=2, default=str),
-                            file_name=json_name,
-                            mime="application/json",
-                        )
-
-                    # ── Image cards ──
-                    st.markdown("---")
-                    st.markdown("### Image Details")
-                    st.caption("Sorted by risk level (highest first)")
-
-                    risk_order = {
-                        "CRITICAL": 0, "HIGH": 1, "MEDIUM": 2,
-                        "LOW": 3, "CLEAR": 4, "UNKNOWN": 5,
+                    json_data = {
+                        "metadata": {
+                            "input_file": audit_file.name,
+                            "total_images": len(images),
+                        },
+                        "summary": {"risk_counts": dict(risk_counts)},
+                        "images": [
+                            {
+                                **{k: v for k, v in img.items() if k != "image_bytes"},
+                                **cls,
+                            }
+                            for img, cls in zip(images, classifications)
+                        ],
                     }
-                    paired = sorted(
-                        zip(images, classifications),
-                        key=lambda x: risk_order.get(
-                            x[1].get("risk_level", "UNKNOWN"), 5
-                        ),
-                    )
 
-                    # Risk filter
-                    show_levels = st.multiselect(
-                        "Filter by risk level:",
-                        ["CRITICAL", "HIGH", "MEDIUM", "LOW", "CLEAR"],
-                        default=["CRITICAL", "HIGH", "MEDIUM", "LOW", "CLEAR"],
-                    )
-
-                    for img_info, cls in paired:
-                        risk_level = cls.get("risk_level", "UNKNOWN")
-                        if risk_level not in show_levels:
-                            continue
-
-                        risk_css = risk_level.lower() if risk_level in risk_order else "unknown"
-
-                        col1, col2 = st.columns([1, 3])
-                        with col1:
-                            try:
-                                from PIL import Image as PILImage
-                                pil_img = PILImage.open(
-                                    io.BytesIO(img_info["image_bytes"])
-                                )
-                                st.image(pil_img, width=200)
-                            except Exception:
-                                st.caption("*(preview unavailable)*")
-
-                        with col2:
-                            risk_display = cls.get("risk_level", "ERROR")
-                            img_type = cls.get("image_type", "ERROR")
-                            action = cls.get("recommended_action", "N/A")
-
-                            # Header line
-                            risk_colour = {
-                                "CRITICAL": "#DC2626", "HIGH": "#EA580C",
-                                "MEDIUM": "#D97706", "LOW": "#16A34A",
-                                "CLEAR": "#059669",
-                            }.get(risk_display, "#6B7280")
-
-                            st.markdown(
-                                f"**Slide {img_info['slide_number']}** &nbsp; "
-                                f"<span style='background:{risk_colour};color:white;"
-                                f"padding:2px 8px;border-radius:4px;font-size:0.8rem;'>"
-                                f"{risk_display}</span> &nbsp; "
-                                f"<span style='background:#E5E7EB;padding:2px 8px;"
-                                f"border-radius:4px;font-size:0.8rem;'>{img_type}</span>",
-                                unsafe_allow_html=True,
-                            )
-
-                            if "error" in cls:
-                                st.error(cls["error"])
-                            else:
-                                st.markdown(cls.get("reasoning", ""))
-
-                                if cls.get("content_description"):
-                                    st.caption(f"Content: {cls['content_description']}")
-
-                                st.caption(f"Recommended action: **{action}**")
-
-                                flags = []
-                                if cls.get("watermark_text"):
-                                    flags.append(f"Watermark: {cls['watermark_text']}")
-                                if cls.get("copyright_notice"):
-                                    flags.append(f"Copyright: {cls['copyright_notice']}")
-                                if cls.get("brand_visible"):
-                                    flags.append(f"Brand: {cls['brand_visible']}")
-                                if flags:
-                                    st.warning(" | ".join(flags))
-
-                        st.markdown("---")
+                    # Store in session state
+                    st.session_state["audit_result"] = {
+                        "mode": "classified",
+                        "images": images,
+                        "classifications": classifications,
+                        "risk_counts": dict(risk_counts),
+                        "html_content": html_content,
+                        "json_data": json_data,
+                        "num_unique_slides": num_unique_slides,
+                        "source_name": audit_file.name,
+                    }
 
             except Exception as e:
                 st.error(f"Something went wrong: {e}")
@@ -660,3 +526,184 @@ with tab2:
                     os.unlink(tmp_path)
                 except Exception:
                     pass
+
+        # ── Display results from session state (persists across reruns) ──
+        if "audit_result" in st.session_state:
+            ar = st.session_state["audit_result"]
+            images = ar["images"]
+
+            st.success(
+                f"Found **{len(images)}** unique images across "
+                f"{ar['num_unique_slides']} slides"
+            )
+
+            if ar["mode"] == "extract_only":
+                st.markdown("---")
+                st.markdown("### Extracted Images")
+                st.caption("Showing all images found in the deck. Run with AI classification to get risk ratings.")
+
+                for img_info in images:
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        try:
+                            from PIL import Image as PILImage
+                            pil_img = PILImage.open(io.BytesIO(img_info["image_bytes"]))
+                            st.image(pil_img, width=180)
+                        except Exception:
+                            st.caption("*(preview unavailable)*")
+                    with col2:
+                        st.markdown(
+                            f"**Slide {img_info['slide_number']}** — "
+                            f"`{img_info['filename']}`"
+                        )
+                        st.caption(
+                            f"{img_info['width']}×{img_info['height']}px "
+                            f"  |  {img_info['content_type']}"
+                        )
+                        if img_info.get("slide_title"):
+                            st.caption(f"Slide title: {img_info['slide_title']}")
+                    st.markdown("---")
+
+            elif ar["mode"] == "classified":
+                classifications = ar["classifications"]
+                risk_counts = ar["risk_counts"]
+
+                st.success("Classification complete!")
+
+                # ── Risk Summary ──
+                st.markdown("### Risk Summary")
+
+                risk_items = [
+                    ("Critical", risk_counts.get("CRITICAL", 0), "critical", "#DC2626"),
+                    ("High", risk_counts.get("HIGH", 0), "high", "#EA580C"),
+                    ("Medium", risk_counts.get("MEDIUM", 0), "medium", "#D97706"),
+                    ("Low", risk_counts.get("LOW", 0), "low", "#16A34A"),
+                    ("Clear", risk_counts.get("CLEAR", 0), "clear", "#059669"),
+                ]
+
+                cols = st.columns(5)
+                for col, (label, count, cls_name, colour) in zip(cols, risk_items):
+                    col.markdown(
+                        f"<div class='stat-card'>"
+                        f"<div class='number' style='color:{colour};'>{count}</div>"
+                        f"<div class='label'>{label}</div></div>",
+                        unsafe_allow_html=True,
+                    )
+
+                # Key message based on results
+                critical_high = risk_counts.get("CRITICAL", 0) + risk_counts.get("HIGH", 0)
+                if critical_high > 0:
+                    st.warning(
+                        f"**{critical_high} image{'s' if critical_high != 1 else ''} "
+                        f"flagged as Critical or High risk** — "
+                        f"these likely need replacement or licence verification.",
+                        icon="⚠️",
+                    )
+
+                # ── Downloads ──
+                st.markdown("---")
+                st.markdown("### Download Report")
+
+                dl_col1, dl_col2 = st.columns(2)
+
+                with dl_col1:
+                    report_name = ar["source_name"].replace(".pptx", "_audit_report.html")
+                    st.download_button(
+                        label="Download HTML Report",
+                        data=ar["html_content"],
+                        file_name=report_name,
+                        mime="text/html",
+                        type="primary",
+                    )
+
+                with dl_col2:
+                    json_name = ar["source_name"].replace(".pptx", "_audit_data.json")
+                    st.download_button(
+                        label="Download JSON Data",
+                        data=json.dumps(ar["json_data"], indent=2, default=str),
+                        file_name=json_name,
+                        mime="application/json",
+                    )
+
+                # ── Image cards ──
+                st.markdown("---")
+                st.markdown("### Image Details")
+                st.caption("Sorted by risk level (highest first)")
+
+                risk_order = {
+                    "CRITICAL": 0, "HIGH": 1, "MEDIUM": 2,
+                    "LOW": 3, "CLEAR": 4, "UNKNOWN": 5,
+                }
+                paired = sorted(
+                    zip(images, classifications),
+                    key=lambda x: risk_order.get(
+                        x[1].get("risk_level", "UNKNOWN"), 5
+                    ),
+                )
+
+                # Risk filter
+                show_levels = st.multiselect(
+                    "Filter by risk level:",
+                    ["CRITICAL", "HIGH", "MEDIUM", "LOW", "CLEAR"],
+                    default=["CRITICAL", "HIGH", "MEDIUM", "LOW", "CLEAR"],
+                )
+
+                for img_info, cls in paired:
+                    risk_level = cls.get("risk_level", "UNKNOWN")
+                    if risk_level not in show_levels:
+                        continue
+
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        try:
+                            from PIL import Image as PILImage
+                            pil_img = PILImage.open(
+                                io.BytesIO(img_info["image_bytes"])
+                            )
+                            st.image(pil_img, width=200)
+                        except Exception:
+                            st.caption("*(preview unavailable)*")
+
+                    with col2:
+                        risk_display = cls.get("risk_level", "ERROR")
+                        img_type = cls.get("image_type", "ERROR")
+                        action = cls.get("recommended_action", "N/A")
+
+                        # Header line
+                        risk_colour = {
+                            "CRITICAL": "#DC2626", "HIGH": "#EA580C",
+                            "MEDIUM": "#D97706", "LOW": "#16A34A",
+                            "CLEAR": "#059669",
+                        }.get(risk_display, "#6B7280")
+
+                        st.markdown(
+                            f"**Slide {img_info['slide_number']}** &nbsp; "
+                            f"<span style='background:{risk_colour};color:white;"
+                            f"padding:2px 8px;border-radius:4px;font-size:0.8rem;'>"
+                            f"{risk_display}</span> &nbsp; "
+                            f"<span style='background:#E5E7EB;padding:2px 8px;"
+                            f"border-radius:4px;font-size:0.8rem;'>{img_type}</span>",
+                            unsafe_allow_html=True,
+                        )
+
+                        if "error" in cls:
+                            st.error(cls["error"])
+                        else:
+                            st.markdown(cls.get("reasoning", ""))
+
+                            if cls.get("content_description"):
+                                st.caption(f"Content: {cls['content_description']}")
+
+                            st.caption(f"Recommended action: **{action}**")
+
+                            flags = []
+                            if cls.get("watermark_text"):
+                                flags.append(f"Watermark: {cls['watermark_text']}")
+                            if cls.get("copyright_notice"):
+                                flags.append(f"Copyright: {cls['copyright_notice']}")
+                            if cls.get("brand_visible"):
+                                flags.append(f"Brand: {cls['brand_visible']}")
+                            if flags:
+                                st.warning(" | ".join(flags))
+
+                    st.markdown("---")

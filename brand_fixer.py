@@ -54,6 +54,16 @@ UQ_APPROVED_COLOURS = {
 # Colours that are "dark" enough to have white text on them
 DARK_BACKGROUNDS = {UQ_PURPLE, UQ_MAGENTA, UQ_DARK, BLACK}
 
+# Common near-black colours that should be auto-corrected to UQ_DARK
+# These are frequently used dark greys/blacks that are clearly meant to be
+# "body text black" — not intentional accent colours
+NEAR_BLACK_COLOURS = {
+    "#000000", "#111111", "#1A1A1A", "#202020", "#202124",
+    "#222222", "#262626", "#2C2C2C", "#303030", "#333333",
+    "#363636", "#3C3C3C", "#404040", "#444444", "#464646",
+    "#4A4A4A", "#4D4D4D", "#505050", "#515151", "#545454",
+}
+
 # Standard heading size range (pt)
 TITLE_SIZE_MIN = Pt(28)
 TITLE_SIZE_MAX = Pt(44)
@@ -368,8 +378,22 @@ class BrandFixer:
                     new_colour = WHITE
                 else:
                     # Standard body text on light background → UQ dark
-                    # But if the colour is close to black, just nudge to UQ_DARK
-                    if colour_distance(colour, BLACK) < 60:
+                    # Check if it's a near-black colour (common dark greys
+                    # used as body text) — auto-correct these to UQ_DARK.
+                    # Uses both an explicit list of common hex values AND
+                    # a luminance check (dark colours with low saturation
+                    # are almost certainly "meant to be black" body text).
+                    r, g, b = colour[0], colour[1], colour[2]
+                    is_near_black = (
+                        old_hex.upper() in NEAR_BLACK_COLOURS
+                        or colour_distance(colour, BLACK) < 60
+                        or (
+                            # Low luminance + low saturation = dark grey
+                            max(r, g, b) < 100
+                            and (max(r, g, b) - min(r, g, b)) < 30
+                        )
+                    )
+                    if is_near_black:
                         new_colour = UQ_DARK
                     else:
                         # It's a non-approved accent colour — leave it and flag
