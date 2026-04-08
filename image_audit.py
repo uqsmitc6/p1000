@@ -53,6 +53,17 @@ that fall OUTSIDE Australia's statutory education licence. Every uncleared copyr
 is genuine legal exposure. Err on the side of flagging — false positives are acceptable,
 false negatives are dangerous.
 
+LICENSING CONTEXT — READ CAREFULLY:
+UQ holds licences for the following stock image services:
+- Adobe Stock (institutional licence)
+- Shutterstock (institutional licence)
+- Microsoft 365 stock images (included with institutional M365 subscription)
+
+Images from these providers are LEGALLY COVERED for commercial use at UQ, provided they are
+properly attributed. If an image looks like a stock photo AND the nearby slide text contains
+an attribution (e.g. "Source: Adobe Stock 123456789", "Image licensed through Shutterstock: 456",
+"Images: Microsoft Stock"), treat it as LICENSED — not as a copyright risk.
+
 Analyse this image and provide a JSON response with EXACTLY these fields:
 
 {
@@ -63,9 +74,10 @@ Analyse this image and provide a JSON response with EXACTLY these fields:
   "watermark_text": "<any visible watermark text, or null>",
   "copyright_notice": "<any visible copyright notice, or null>",
   "brand_visible": "<any publication/brand name visible, or null>",
+  "attribution_found": "<the attribution text found on the slide, if any, or null>",
   "is_decorative": <true if purely decorative, false if conveys specific content>,
   "content_description": "<brief description of what the image shows — useful for finding a replacement if needed>",
-  "recommended_action": "<one of: REPLACE_IMMEDIATELY, VERIFY_LICENCE, CHECK_SOURCE, REVIEW_MANUALLY, NO_ACTION>"
+  "recommended_action": "<one of: REPLACE_IMMEDIATELY, VERIFY_LICENCE, ADD_ATTRIBUTION, CHECK_SOURCE, REVIEW_MANUALLY, NO_ACTION>"
 }
 
 CLASSIFICATION GUIDE:
@@ -82,11 +94,25 @@ CLASSIFICATION GUIDE:
 - OTHER: Anything else
 
 RISK GUIDE:
-- CRITICAL: Visible watermark, copyright notice, or clearly identifiable commercial publication branding
-- HIGH: Appears from a published/commercial source but no visible watermark
-- MEDIUM: Professional stock photo or diagram of uncertain origin
-- LOW: Appears original, AI-generated, UQ-branded, or a simple icon
-- CLEAR: Clearly UQ institutional asset, simple shapes, or obviously author-created
+- CRITICAL: Visible watermark, copyright notice, or clearly identifiable commercial publication branding.
+  Exception: Adobe Stock / Shutterstock / Microsoft Stock watermarks on images that also have an
+  on-slide attribution are NOT critical — they are licensed. Classify as LOW.
+- HIGH: Appears from a published/commercial source with no visible watermark AND no attribution found
+  in nearby slide text. If the nearby text DOES contain an attribution mentioning Adobe Stock,
+  Shutterstock, or Microsoft Stock, downgrade to LOW.
+- MEDIUM: Professional stock photo or diagram of uncertain origin, but no attribution found.
+  If attribution IS present for a licensed provider, downgrade to LOW.
+- LOW: Licensed stock photo with proper attribution, appears original, AI-generated, UQ-branded,
+  or a simple icon.
+- CLEAR: Clearly UQ institutional asset, simple shapes, or obviously author-created.
+
+RECOMMENDED ACTION GUIDE:
+- REPLACE_IMMEDIATELY: Watermarked, clearly copyrighted, and NOT from a UQ-licensed provider
+- VERIFY_LICENCE: Looks like stock but no attribution found — may be licensed, needs checking
+- ADD_ATTRIBUTION: Appears to be a licensed stock photo but the slide has no attribution text
+- CHECK_SOURCE: Uncertain origin — could be original or from a published source
+- REVIEW_MANUALLY: Complex case that needs human judgement
+- NO_ACTION: Licensed and attributed, UQ-branded, original, or clearly fine
 
 Respond with ONLY the JSON object, no other text."""
 
@@ -97,9 +123,13 @@ ADDITIONAL CONTEXT from the slide:
 - Image alt text: {alt_text}
 - Shape name: {shape_name}
 - Slide notes: {slide_notes}
+- Detected attribution text: {detected_attribution}
 
-Consider this context when assessing the image. For example, if nearby text attributes
-the image to a specific source, that's relevant to the risk assessment."""
+IMPORTANT: Check the "Nearby text" and "Detected attribution text" fields carefully for
+attribution patterns like "Source: Adobe Stock 123456789", "Image licensed through Shutterstock",
+"Images: Microsoft Stock", "Source: Wikimedia Commons", "Source: Public domain", etc.
+If you find such an attribution, report it in the "attribution_found" field of your response
+and factor it into your risk assessment (licensed + attributed = LOW risk)."""
 
 
 # ─── Image Extraction ──────────────────────────────────────────────────
@@ -294,6 +324,55 @@ def _extract_image_from_shape(shape, slide_idx, img_count,
         return None
 
 
+# ─── Attribution Detection ────────────────────────────────────────────
+
+import re
+
+# Patterns that indicate an image attribution is present on the slide
+_ATTRIBUTION_PATTERNS = [
+    re.compile(r"Source:\s*Adobe\s*Stock\s*\d+", re.IGNORECASE),
+    re.compile(r"Image\s+licensed\s+through\s+Adobe\s*Stock[:\s]*\d*", re.IGNORECASE),
+    re.compile(r"Source:\s*Shutterstock\s*\d+", re.IGNORECASE),
+    re.compile(r"Image\s+licensed\s+through\s+Shutterstock[:\s]*\d*", re.IGNORECASE),
+    re.compile(r"Images?:\s*Microsoft\s+Stock", re.IGNORECASE),
+    re.compile(r"Source:\s*Microsoft\s+Stock", re.IGNORECASE),
+    re.compile(r"Source:.*Wikimedia\s+Commons", re.IGNORECASE),
+    re.compile(r"Source:\s*Public\s+domain", re.IGNORECASE),
+    re.compile(r"Source:.*CC\s+BY", re.IGNORECASE),
+    re.compile(r"Source:.*Creative\s+Commons", re.IGNORECASE),
+    re.compile(r"Image\s+source:", re.IGNORECASE),
+    re.compile(r"Photo\s+(?:by|credit|courtesy)", re.IGNORECASE),
+    re.compile(r"Source:.*Flickr", re.IGNORECASE),
+    re.compile(r"Source:.*Unsplash", re.IGNORECASE),
+    re.compile(r"Source:.*Pexels", re.IGNORECASE),
+    re.compile(r"Source:.*Getty", re.IGNORECASE),
+    re.compile(r"Source:.*iStock", re.IGNORECASE),
+]
+
+
+def _detect_attribution(image_info):
+    """Scan slide text and notes for image attribution patterns.
+
+    Returns the matched attribution text if found, or None.
+    """
+    text_sources = [
+        image_info.get("nearby_text", ""),
+        image_info.get("slide_notes", ""),
+        image_info.get("alt_text", ""),
+    ]
+    combined = " ".join(t for t in text_sources if t)
+
+    for pattern in _ATTRIBUTION_PATTERNS:
+        m = pattern.search(combined)
+        if m:
+            # Return the matched text plus some surrounding context
+            start = max(0, m.start() - 10)
+            end = min(len(combined), m.end() + 30)
+            return combined[start:end].strip()
+
+    return None
+
+
 # ─── AI Classification ─────────────────────────────────────────────────
 
 def classify_image(client, image_info):
@@ -336,6 +415,9 @@ def classify_image(client, image_info):
     # Build the base64 data
     b64_data = base64.b64encode(image_bytes).decode("utf-8")
 
+    # Detect attribution text from slide context
+    detected_attribution = _detect_attribution(image_info)
+
     # Build context string
     context = CONTEXT_PROMPT_TEMPLATE.format(
         slide_title=image_info.get("slide_title", "N/A"),
@@ -343,6 +425,7 @@ def classify_image(client, image_info):
         alt_text=image_info.get("alt_text", "N/A"),
         shape_name=image_info.get("shape_name", "N/A"),
         slide_notes=image_info.get("slide_notes", "N/A")[:300],
+        detected_attribution=detected_attribution or "None found",
     )
 
     full_prompt = CLASSIFICATION_PROMPT + context
@@ -395,8 +478,19 @@ def classify_image(client, image_info):
 
 # ─── HTML Report Generation ───────────────────────────────────────────
 
-def generate_html_report(images, classifications, pptx_name, output_path, extracted_dir):
-    """Generate a styled HTML compliance report."""
+def generate_html_report(images, classifications, pptx_name, output_path, extracted_dir, image_bytes_map=None):
+    """Generate a styled HTML compliance report.
+
+    Args:
+        images: List of image metadata dicts
+        classifications: List of classification result dicts
+        pptx_name: Name of the source PPTX file
+        output_path: Path to write the HTML report
+        extracted_dir: Directory containing extracted images (for file-based src)
+        image_bytes_map: Optional dict of {filename: bytes} for self-contained
+                        base64-embedded images. When provided, images are embedded
+                        directly in the HTML as data URIs instead of file references.
+    """
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # Calculate summary stats
@@ -455,8 +549,17 @@ def generate_html_report(images, classifications, pptx_name, output_path, extrac
             risk_colour = risk_colours.get(risk_level, "#6B7280")
             risk_bg = risk_bg_colours.get(risk_level, "#F3F4F6")
 
-        # Build image src — use relative path to extracted images
-        img_src = f"{extracted_dir}/{img_info['filename']}" if extracted_dir else ""
+        # Build image src — use base64 data URI if image bytes available,
+        # otherwise fall back to relative file path
+        img_src = ""
+        filename = img_info.get('filename', '')
+        if image_bytes_map and filename in image_bytes_map:
+            img_bytes = image_bytes_map[filename]
+            content_type = img_info.get('content_type', 'image/png')
+            b64 = base64.b64encode(img_bytes).decode('ascii')
+            img_src = f"data:{content_type};base64,{b64}"
+        elif extracted_dir:
+            img_src = f"{extracted_dir}/{filename}"
 
         flags = []
         if cls.get("watermark_text"):

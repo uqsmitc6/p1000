@@ -30,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from pptx import Presentation
 from brand_fixer import BrandFixer
 from image_audit import extract_images, classify_image, generate_html_report
+from ref_checker import RefChecker
+from combined_pipeline import run_pipeline
 
 
 # ─── API Key from secrets ──────────────────────────────────────────────
@@ -101,6 +103,12 @@ st.markdown("""
     .change-footer { border-left-color: #962A8B; background: #FDF0FA; }
     .change-heading_size { border-left-color: #E62645; background: #FFF0F3; }
     .change-bullet { border-left-color: #FBB800; background: #FFFDE7; }
+    .change-body_size_flagged { border-left-color: #7C3AED; background: #F5F3FF; }
+    .change-citation { border-left-color: #4085C6; background: #F0F7FF; }
+    .change-reference { border-left-color: #51247A; background: #F5F0FA; }
+    .change-attribution { border-left-color: #16A34A; background: #F0FDF4; }
+    .change-cross_ref { border-left-color: #D97706; background: #FFFBEB; }
+    .change-missing_attr { border-left-color: #E62645; background: #FFF0F3; }
 
     /* Hide deploy button and Streamlit branding */
     .stDeployButton { display: none; }
@@ -143,12 +151,21 @@ with st.sidebar:
         "**Image Audit** — Upload a `.pptx` and the tool will extract "
         "every image and classify its copyright risk using AI."
     )
+    st.markdown(
+        "**Reference Checker** — Scans citations, references, and image "
+        "attributions. Auto-fixes formatting where possible."
+    )
+    st.markdown(
+        "**Full Compliance Check** — Runs all three checks in sequence "
+        "and produces a unified report. One upload, one click."
+    )
     st.markdown("---")
     st.markdown(
         "**Tips:**\n"
         "- Start with 'Extract only' to preview images before running the full audit\n"
         "- For large decks, set a limit (e.g. 10) to test before running all images\n"
-        "- The brand fixer flags uncertain colours for you to review manually"
+        "- The brand fixer flags uncertain colours for you to review manually\n"
+        "- Use 'Full Compliance Check' to run everything at once"
     )
     st.markdown("---")
 
@@ -168,7 +185,7 @@ with st.sidebar:
 
 # ─── Main Tabs ─────────────────────────────────────────────────────────
 
-tab1, tab2 = st.tabs(["Brand Fixer", "Image Audit"])
+tab1, tab2, tab3, tab4 = st.tabs(["Brand Fixer", "Image Audit", "Reference Checker", "Full Compliance Check"])
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -213,14 +230,16 @@ with tab1:
                 # Progress updates
                 progress = st.progress(0, text="Fixing fonts...")
                 fixer.fix_fonts()
-                progress.progress(17, text="Fixing text colours...")
+                progress.progress(14, text="Fixing text colours...")
                 fixer.fix_colours()
-                progress.progress(34, text="Restyling tables...")
+                progress.progress(28, text="Restyling tables...")
                 fixer.fix_tables()
-                progress.progress(50, text="Standardising footers...")
+                progress.progress(42, text="Standardising footers...")
                 fixer.fix_footers()
-                progress.progress(67, text="Normalising heading sizes...")
+                progress.progress(56, text="Normalising heading sizes...")
                 fixer.fix_heading_sizes()
+                progress.progress(70, text="Checking body text sizes...")
+                fixer.flag_body_text_sizes()
                 progress.progress(84, text="Fixing bullet styles...")
                 fixer.fix_bullets()
                 progress.progress(100, text="Done!")
@@ -270,7 +289,7 @@ with tab1:
                 )
             else:
                 stats = report["summary"]
-                cols = st.columns(7)
+                cols = st.columns(8)
                 stat_items = [
                     ("Font fixes", stats.get("font", 0), "#4085C6"),
                     ("Colour fixes", stats.get("colour", 0), "#51247A"),
@@ -278,6 +297,7 @@ with tab1:
                     ("Tables", stats.get("table", 0), "#16A34A"),
                     ("Footers", stats.get("footer", 0), "#962A8B"),
                     ("Headings", stats.get("heading_size", 0), "#E62645"),
+                    ("Body size", stats.get("body_size_flagged", 0), "#7C3AED"),
                     ("Bullets", stats.get("bullet", 0), "#FBB800"),
                 ]
                 for col, (label, count, colour) in zip(cols, stat_items):
@@ -326,6 +346,29 @@ with tab1:
                                     f"Slide {c['slide']}: {c['detail']}</div>",
                                     unsafe_allow_html=True,
                                 )
+
+                # ── Body text size flags ──
+                body_flagged = [
+                    c for c in report["changes"]
+                    if c["category"] == "body_size_flagged"
+                ]
+                if body_flagged:
+                    with st.expander(
+                        f"📏  {len(body_flagged)} body text sizes flagged for review",
+                        expanded=False,
+                    ):
+                        st.markdown(
+                            "These body text runs are outside the recommended "
+                            "12–24pt range. They were **not auto-corrected** "
+                            "as small text may be intentional (captions, footnotes). "
+                            "Review and adjust if needed:"
+                        )
+                        for c in body_flagged:
+                            st.markdown(
+                                f"<div class='change-item change-body_size_flagged'>"
+                                f"Slide {c['slide']}: {c['detail']}</div>",
+                                unsafe_allow_html=True,
+                            )
 
                 # ── Detailed changes (collapsed) ──
                 if report["changes"]:
@@ -464,24 +507,30 @@ with tab2:
                     progress.progress(1.0)
                     status_text.empty()
 
-                    # Generate HTML report while images are still in temp dir
-                    with tempfile.TemporaryDirectory() as report_dir:
-                        for img_info in images:
-                            img_path = Path(report_dir) / "images" / img_info["filename"]
-                            img_path.parent.mkdir(exist_ok=True)
-                            img_path.write_bytes(img_info["image_bytes"])
+                    # Generate self-contained HTML report with embedded images
+                    image_bytes_map = {
+                        img["filename"]: img["image_bytes"]
+                        for img in images if "image_bytes" in img
+                    }
+                    images_clean = [
+                        {k: v for k, v in img.items() if k != "image_bytes"}
+                        for img in images
+                    ]
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".html", delete=False, mode="w"
+                    ) as report_tmp:
+                        report_path = report_tmp.name
 
-                        report_path = Path(report_dir) / "report.html"
-                        images_clean = []
-                        for img in images:
-                            images_clean.append(
-                                {k: v for k, v in img.items() if k != "image_bytes"}
-                            )
-                        generate_html_report(
-                            images_clean, classifications,
-                            audit_file.name, str(report_path), "images",
-                        )
-                        html_content = report_path.read_text()
+                    generate_html_report(
+                        images_clean, classifications,
+                        audit_file.name, report_path, None,
+                        image_bytes_map=image_bytes_map,
+                    )
+                    html_content = Path(report_path).read_text()
+                    try:
+                        os.unlink(report_path)
+                    except Exception:
+                        pass
 
                     # Build JSON data
                     risk_counts = defaultdict(int)
@@ -707,3 +756,650 @@ with tab2:
                                 st.warning(" | ".join(flags))
 
                     st.markdown("---")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TAB 3: Reference Checker
+# ═══════════════════════════════════════════════════════════════════════
+
+with tab3:
+    st.markdown("#### Upload a slide deck to check references and image attributions")
+
+    st.markdown("""
+    <div class="info-box">
+        <strong>What this does:</strong> Scans all slide text for in-text citations,
+        reference lists, and image attribution text. Checks APA 7 formatting,
+        standardises image attributions (e.g. to "Source: Adobe Stock {ID}"),
+        cross-references citations against the reference list, and flags slides
+        with images but no attribution.<br/><br/>
+        <strong>Auto-fixes:</strong> Standardises attribution formats, fixes
+        "&amp;" vs "and" in citations, adds missing periods after "et al".
+        Downloads include both the fixed file and a detailed report.
+    </div>
+    """, unsafe_allow_html=True)
+
+    ref_file = st.file_uploader(
+        "Choose a .pptx file",
+        type=["pptx"],
+        key="ref_upload",
+        help="Upload the slide deck you want to check",
+    )
+
+    if ref_file is not None:
+        file_size_mb = len(ref_file.getvalue()) / (1024 * 1024)
+        st.caption(f"Uploaded: **{ref_file.name}** ({file_size_mb:.1f} MB)")
+
+        col_mode_a, col_mode_b = st.columns(2)
+        with col_mode_a:
+            report_only = st.checkbox(
+                "Report only (don't modify file)",
+                help="Just scan and report — don't make any changes to the file",
+            )
+
+        if st.button("Check References", type="primary", key="run_ref"):
+            with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
+                tmp.write(ref_file.getvalue())
+                tmp_path = tmp.name
+
+            try:
+                prs = Presentation(tmp_path)
+                checker = RefChecker(prs, report=True)
+
+                progress = st.progress(0, text="Scanning citations...")
+                checker.scan_citations()
+                progress.progress(25, text="Scanning reference lists...")
+                checker.scan_references()
+                progress.progress(50, text="Checking image attributions...")
+                checker.scan_attributions()
+                progress.progress(75, text="Cross-referencing...")
+                checker.cross_reference()
+
+                if not report_only:
+                    progress.progress(85, text="Applying fixes...")
+                    checker.fix_attributions()
+                    checker.fix_citations()
+
+                progress.progress(100, text="Done!")
+
+                report = checker.generate_report()
+
+                # Save fixed file if not report-only
+                output_bytes = None
+                if not report_only:
+                    output_buffer = io.BytesIO()
+                    prs.save(output_buffer)
+                    output_bytes = output_buffer.getvalue()
+
+                # Store in session state
+                st.session_state["ref_result"] = {
+                    "report": report,
+                    "output_bytes": output_bytes,
+                    "report_only": report_only,
+                    "source_name": ref_file.name,
+                    "fixed_name": ref_file.name.replace(".pptx", "_REFFIXED.pptx"),
+                    "num_slides": len(prs.slides),
+                }
+
+            except Exception as e:
+                st.error(f"Something went wrong: {e}")
+                with st.expander("Error details"):
+                    import traceback
+                    st.code(traceback.format_exc())
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+        # ── Display results from session state ──
+        if "ref_result" in st.session_state:
+            rr = st.session_state["ref_result"]
+            report = rr["report"]
+
+            st.markdown("---")
+            st.markdown("### Results")
+
+            # ── Summary stats ──
+            summary = report["summary"]
+            cols = st.columns(5)
+            stat_items = [
+                ("Citations", summary["citations_found"], "#4085C6"),
+                ("References", summary["references_found"], "#51247A"),
+                ("Issues", report["total_issues"], "#D97706"),
+                ("Auto-fixed", report["total_changes"], "#16A34A"),
+                ("Ref slides", len(summary["ref_slides"]), "#962A8B"),
+            ]
+            for col, (label, count, colour) in zip(cols, stat_items):
+                col.markdown(
+                    f"<div class='stat-card'>"
+                    f"<div class='number' style='color:{colour};'>{count}</div>"
+                    f"<div class='label'>{label}</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+            if report["total_issues"] == 0:
+                st.success(
+                    "No reference or attribution issues found!",
+                    icon="✅",
+                )
+            else:
+                # Issue breakdown
+                by_cat = summary.get("issues_by_category", {})
+                by_sev = summary.get("issues_by_severity", {})
+
+                if by_sev.get("warning", 0) > 0 or by_sev.get("error", 0) > 0:
+                    warn_count = by_sev.get("warning", 0) + by_sev.get("error", 0)
+                    st.warning(
+                        f"**{warn_count} issue{'s' if warn_count != 1 else ''} "
+                        f"need attention** — see details below.",
+                        icon="⚠️",
+                    )
+
+                # ── Download buttons ──
+                dl_cols = st.columns(2)
+                with dl_cols[0]:
+                    if not rr["report_only"] and rr["output_bytes"]:
+                        st.download_button(
+                            label=f"Download {rr['fixed_name']}",
+                            data=rr["output_bytes"],
+                            file_name=rr["fixed_name"],
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            type="primary",
+                        )
+
+                with dl_cols[1]:
+                    json_name = rr["source_name"].replace(".pptx", "_ref_report.json")
+                    st.download_button(
+                        label="Download JSON Report",
+                        data=json.dumps(report, indent=2, default=str),
+                        file_name=json_name,
+                        mime="application/json",
+                    )
+
+                # ── Changes made (if auto-fixed) ──
+                if report["changes"]:
+                    with st.expander(
+                        f"✅ {report['total_changes']} auto-fixes applied",
+                        expanded=True,
+                    ):
+                        for c in report["changes"]:
+                            cat = c["category"]
+                            st.markdown(
+                                f"<div class='change-item change-{cat}'>"
+                                f"Slide {c['slide']}: {c['detail']}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                # ── Issues by category ──
+
+                # Missing attributions
+                missing = [i for i in report["issues"]
+                           if i["category"] == "missing_attr"]
+                if missing:
+                    with st.expander(
+                        f"🖼️ {len(missing)} slides with images but no attribution",
+                        expanded=True,
+                    ):
+                        st.markdown(
+                            "These slides have images but no "
+                            "'Source: ...' text. Consider adding attribution:"
+                        )
+                        for i in missing:
+                            st.markdown(
+                                f"<div class='change-item change-missing_attr'>"
+                                f"Slide {i['slide']}: {i['description']}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                # Cross-reference issues
+                xref_warnings = [i for i in report["issues"]
+                                 if i["category"] == "cross_ref"
+                                 and i["severity"] == "warning"]
+                xref_info = [i for i in report["issues"]
+                             if i["category"] == "cross_ref"
+                             and i["severity"] == "info"]
+
+                if xref_warnings:
+                    with st.expander(
+                        f"🔗 {len(xref_warnings)} orphaned citations "
+                        f"(cited but not in references)",
+                        expanded=True,
+                    ):
+                        for i in xref_warnings:
+                            detail = i['description']
+                            if i.get('original'):
+                                detail += f" — `{i['original']}`"
+                            st.markdown(
+                                f"<div class='change-item change-cross_ref'>"
+                                f"Slide {i['slide']}: {detail}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                if xref_info:
+                    with st.expander(
+                        f"📚 {len(xref_info)} references never cited in slides",
+                        expanded=False,
+                    ):
+                        st.caption(
+                            "These are in the reference list but never cited "
+                            "in slide text. They may be 'further reading' — "
+                            "review and decide."
+                        )
+                        for i in xref_info:
+                            st.markdown(
+                                f"<div class='change-item change-cross_ref'>"
+                                f"Slide {i['slide']}: {i['description']}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                # Citation formatting issues
+                cite_issues = [i for i in report["issues"]
+                               if i["category"] == "citation"]
+                if cite_issues:
+                    with st.expander(
+                        f"📝 {len(cite_issues)} citation formatting issues",
+                        expanded=False,
+                    ):
+                        for i in cite_issues:
+                            detail = i['description']
+                            if i.get('original') and i.get('suggested'):
+                                detail += (f"<br/>"
+                                           f"<code>{i['original']}</code> → "
+                                           f"<code>{i['suggested']}</code>")
+                            st.markdown(
+                                f"<div class='change-item change-citation'>"
+                                f"Slide {i['slide']}: {detail}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                # Attribution formatting issues
+                attr_issues = [i for i in report["issues"]
+                               if i["category"] == "attribution"]
+                if attr_issues:
+                    with st.expander(
+                        f"🏷️ {len(attr_issues)} attribution formatting issues",
+                        expanded=False,
+                    ):
+                        for i in attr_issues:
+                            detail = i['description']
+                            if i.get('original') and i.get('suggested'):
+                                detail += (f"<br/>"
+                                           f"<code>{i['original']}</code> → "
+                                           f"<code>{i['suggested']}</code>")
+                            st.markdown(
+                                f"<div class='change-item change-attribution'>"
+                                f"Slide {i['slide']}: {detail}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                # Reference formatting issues
+                ref_issues = [i for i in report["issues"]
+                              if i["category"] == "reference"]
+                if ref_issues:
+                    with st.expander(
+                        f"📖 {len(ref_issues)} reference formatting issues",
+                        expanded=False,
+                    ):
+                        for i in ref_issues:
+                            detail = i['description']
+                            if i.get('original'):
+                                detail += f"<br/><code>{i['original']}</code>"
+                            if i.get('suggested'):
+                                detail += f" → <code>{i['suggested']}</code>"
+                            st.markdown(
+                                f"<div class='change-item change-reference'>"
+                                f"Slide {i['slide']}: {detail}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TAB 4: Full Compliance Check (Combined Pipeline)
+# ═══════════════════════════════════════════════════════════════════════
+
+with tab4:
+    st.markdown("#### Upload a slide deck for a full compliance check")
+
+    st.markdown("""
+    <div class="info-box">
+        <strong>What this does:</strong> Runs all three compliance checks in sequence:
+        <ol style="margin: 0.5rem 0 0 1.2rem; font-size: 0.9rem;">
+            <li><strong>Brand Fixer</strong> — fonts, colours, tables, footers, headings, bullets</li>
+            <li><strong>Reference Checker</strong> — citations, reference lists, image attributions</li>
+            <li><strong>Image Audit</strong> — copyright risk classification for every image</li>
+        </ol>
+        <br/>
+        You'll get a single fixed PPTX (brand + reference fixes applied), a self-contained
+        HTML image audit report, and a unified compliance summary — all from one upload.
+    </div>
+    """, unsafe_allow_html=True)
+
+    combo_file = st.file_uploader(
+        "Choose a .pptx file",
+        type=["pptx"],
+        key="combo_upload",
+        help="Upload the slide deck you want to run through the full pipeline",
+    )
+
+    if combo_file is not None:
+        file_size_mb = len(combo_file.getvalue()) / (1024 * 1024)
+        st.caption(f"Uploaded: **{combo_file.name}** ({file_size_mb:.1f} MB)")
+
+        col_opt1, col_opt2 = st.columns(2)
+        with col_opt1:
+            combo_img_limit = st.number_input(
+                "Limit images (0 = all)",
+                min_value=0,
+                max_value=500,
+                value=0,
+                key="combo_img_limit",
+                help="Limit image audit to first N images (0 = audit all). Useful for testing.",
+            )
+        with col_opt2:
+            combo_skip_images = st.checkbox(
+                "Skip image audit (brand + refs only)",
+                key="combo_skip_images",
+                help="Run brand fixer and reference checker only — no AI image classification.",
+            )
+
+        if st.button("Run Full Compliance Check", type="primary", key="run_combo"):
+            # Validate API key if image audit is included
+            api_key = get_api_key()
+            if not combo_skip_images and not api_key:
+                st.error(
+                    "The API key hasn't been configured yet. "
+                    "Ask Sean to set it up, or tick 'Skip image audit' to run brand + refs only."
+                )
+                st.stop()
+
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            def combo_progress(pct, msg):
+                progress_bar.progress(min(pct / 100, 1.0))
+                status_text.markdown(f"**{msg}**")
+
+            try:
+                results = run_pipeline(
+                    pptx_bytes=combo_file.getvalue(),
+                    filename=combo_file.name,
+                    api_key=api_key if not combo_skip_images else None,
+                    image_limit=combo_img_limit if combo_img_limit > 0 else None,
+                    skip_image_audit=combo_skip_images,
+                    progress_callback=combo_progress,
+                )
+
+                progress_bar.progress(1.0)
+                status_text.empty()
+
+                # Store in session state
+                st.session_state["combo_result"] = {
+                    "output_bytes": results["output_bytes"],
+                    "brand_report": results["brand_report"],
+                    "ref_report": results["ref_report"],
+                    "image_report": results["image_report"],
+                    "image_html": results["image_html"],
+                    "image_data": results["image_data"],
+                    "summary": results["summary"],
+                    "source_name": combo_file.name,
+                    "fixed_name": combo_file.name.replace(".pptx", "_COMPLIANT.pptx"),
+                    "skip_images": combo_skip_images,
+                }
+
+            except Exception as e:
+                st.error(f"Something went wrong: {e}")
+                with st.expander("Error details"):
+                    import traceback
+                    st.code(traceback.format_exc())
+
+        # ── Display results from session state ──
+        if "combo_result" in st.session_state:
+            cr = st.session_state["combo_result"]
+            summary = cr["summary"]
+            brand_report = cr["brand_report"]
+            ref_report = cr["ref_report"]
+            image_report = cr["image_report"]
+
+            st.markdown("---")
+            st.markdown("### Compliance Summary")
+
+            # ── Overview stats ──
+            cols = st.columns(4)
+            cols[0].markdown(
+                f"<div class='stat-card'>"
+                f"<div class='number' style='color:#51247A;'>{summary['num_slides']}</div>"
+                f"<div class='label'>Slides</div></div>",
+                unsafe_allow_html=True,
+            )
+            cols[1].markdown(
+                f"<div class='stat-card'>"
+                f"<div class='number' style='color:#4085C6;'>"
+                f"{summary['brand']['total_changes']}</div>"
+                f"<div class='label'>Brand fixes</div></div>",
+                unsafe_allow_html=True,
+            )
+            cols[2].markdown(
+                f"<div class='stat-card'>"
+                f"<div class='number' style='color:#16A34A;'>"
+                f"{summary['references']['total_changes']}</div>"
+                f"<div class='label'>Ref fixes</div></div>",
+                unsafe_allow_html=True,
+            )
+            if summary.get("images"):
+                cols[3].markdown(
+                    f"<div class='stat-card'>"
+                    f"<div class='number' style='color:#D97706;'>"
+                    f"{summary['images']['total_images']}</div>"
+                    f"<div class='label'>Images audited</div></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                cols[3].markdown(
+                    f"<div class='stat-card'>"
+                    f"<div class='number' style='color:#999;'>—</div>"
+                    f"<div class='label'>Images (skipped)</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+            # ── Download section ──
+            st.markdown("---")
+            st.markdown("### Downloads")
+
+            dl_cols = st.columns(3 if not cr["skip_images"] else 2)
+
+            with dl_cols[0]:
+                st.download_button(
+                    label=f"Download {cr['fixed_name']}",
+                    data=cr["output_bytes"],
+                    file_name=cr["fixed_name"],
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    type="primary",
+                )
+                st.caption("Brand + reference fixes applied")
+
+            with dl_cols[1]:
+                json_summary = {
+                    "summary": summary,
+                    "brand": brand_report,
+                    "references": ref_report,
+                }
+                if image_report:
+                    # Include image report without raw classification data to keep JSON manageable
+                    json_summary["images"] = {
+                        "total_images": image_report.get("total_images", 0),
+                        "risk_counts": image_report.get("risk_counts", {}),
+                    }
+                json_name = cr["source_name"].replace(".pptx", "_compliance_report.json")
+                st.download_button(
+                    label="Download JSON Report",
+                    data=json.dumps(json_summary, indent=2, default=str),
+                    file_name=json_name,
+                    mime="application/json",
+                )
+                st.caption("Full compliance data")
+
+            if not cr["skip_images"] and cr.get("image_html"):
+                with dl_cols[2]:
+                    html_name = cr["source_name"].replace(".pptx", "_image_audit.html")
+                    st.download_button(
+                        label="Download Image Audit (HTML)",
+                        data=cr["image_html"],
+                        file_name=html_name,
+                        mime="text/html",
+                    )
+                    st.caption("Self-contained with embedded images")
+
+            # ── Brand Fixer Details ──
+            st.markdown("---")
+            with st.expander(
+                f"🎨 Brand Fixer — {brand_report['total_changes']} changes",
+                expanded=False,
+            ):
+                if brand_report["total_changes"] == 0:
+                    st.success("No brand changes needed!", icon="✅")
+                else:
+                    stats = brand_report["summary"]
+                    bcols = st.columns(7)
+                    brand_stat_items = [
+                        ("Font", stats.get("font", 0), "#4085C6"),
+                        ("Colour", stats.get("colour", 0), "#51247A"),
+                        ("Flagged", stats.get("colour_flagged", 0), "#D97706"),
+                        ("Tables", stats.get("table", 0), "#16A34A"),
+                        ("Footers", stats.get("footer", 0), "#962A8B"),
+                        ("Headings", stats.get("heading_size", 0), "#E62645"),
+                        ("Bullets", stats.get("bullet", 0), "#FBB800"),
+                    ]
+                    for col, (label, count, colour) in zip(bcols, brand_stat_items):
+                        col.markdown(
+                            f"<div class='stat-card'>"
+                            f"<div class='number' style='color:{colour};'>{count}</div>"
+                            f"<div class='label'>{label}</div></div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    # Flagged colours
+                    flagged = [c for c in brand_report["changes"]
+                               if c["category"] == "colour_flagged"]
+                    if flagged:
+                        st.markdown(f"**⚠️ {len(flagged)} colours flagged for review:**")
+                        seen = set()
+                        for c in flagged:
+                            key = (c["slide"], c["detail"])
+                            if key not in seen:
+                                seen.add(key)
+                                st.markdown(
+                                    f"<div class='change-item change-colour_flagged'>"
+                                    f"Slide {c['slide']}: {c['detail']}</div>",
+                                    unsafe_allow_html=True,
+                                )
+
+            # ── Reference Checker Details ──
+            with st.expander(
+                f"📚 Reference Checker — {ref_report['total_issues']} issues, "
+                f"{ref_report['total_changes']} fixes",
+                expanded=False,
+            ):
+                if ref_report["total_issues"] == 0:
+                    st.success("No reference issues found!", icon="✅")
+                else:
+                    ref_summary = ref_report["summary"]
+                    rcols = st.columns(4)
+                    ref_stat_items = [
+                        ("Citations", ref_summary["citations_found"], "#4085C6"),
+                        ("References", ref_summary["references_found"], "#51247A"),
+                        ("Issues", ref_report["total_issues"], "#D97706"),
+                        ("Auto-fixed", ref_report["total_changes"], "#16A34A"),
+                    ]
+                    for col, (label, count, colour) in zip(rcols, ref_stat_items):
+                        col.markdown(
+                            f"<div class='stat-card'>"
+                            f"<div class='number' style='color:{colour};'>{count}</div>"
+                            f"<div class='label'>{label}</div></div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    # Show changes
+                    if ref_report["changes"]:
+                        st.markdown(f"**Auto-fixes applied:**")
+                        for c in ref_report["changes"]:
+                            cat = c["category"]
+                            st.markdown(
+                                f"<div class='change-item change-{cat}'>"
+                                f"Slide {c['slide']}: {c['detail']}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                    # Show key issues
+                    missing = [i for i in ref_report["issues"]
+                               if i["category"] == "missing_attr"]
+                    if missing:
+                        st.markdown(f"**🖼️ {len(missing)} slides with images but no attribution**")
+                        for i in missing:
+                            st.markdown(
+                                f"<div class='change-item change-missing_attr'>"
+                                f"Slide {i['slide']}: {i['description']}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                    xref_warnings = [i for i in ref_report["issues"]
+                                     if i["category"] == "cross_ref"
+                                     and i["severity"] == "warning"]
+                    if xref_warnings:
+                        st.markdown(
+                            f"**🔗 {len(xref_warnings)} orphaned citations "
+                            f"(cited but not in references)**"
+                        )
+                        for i in xref_warnings:
+                            detail = i['description']
+                            if i.get('original'):
+                                detail += f" — `{i['original']}`"
+                            st.markdown(
+                                f"<div class='change-item change-cross_ref'>"
+                                f"Slide {i['slide']}: {detail}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+            # ── Image Audit Details ──
+            if not cr["skip_images"] and image_report:
+                risk_counts = image_report.get("risk_counts", {})
+                with st.expander(
+                    f"🖼️ Image Audit — {image_report.get('total_images', 0)} images",
+                    expanded=False,
+                ):
+                    if image_report.get("total_images", 0) == 0:
+                        st.info("No images found in this presentation.")
+                    elif not risk_counts:
+                        st.info(image_report.get("note", "No classifications available."))
+                    else:
+                        icols = st.columns(5)
+                        risk_items = [
+                            ("Critical", risk_counts.get("CRITICAL", 0), "#DC2626"),
+                            ("High", risk_counts.get("HIGH", 0), "#EA580C"),
+                            ("Medium", risk_counts.get("MEDIUM", 0), "#D97706"),
+                            ("Low", risk_counts.get("LOW", 0), "#16A34A"),
+                            ("Clear", risk_counts.get("CLEAR", 0), "#059669"),
+                        ]
+                        for col, (label, count, colour) in zip(icols, risk_items):
+                            col.markdown(
+                                f"<div class='stat-card'>"
+                                f"<div class='number' style='color:{colour};'>{count}</div>"
+                                f"<div class='label'>{label}</div></div>",
+                                unsafe_allow_html=True,
+                            )
+
+                        critical_high = (
+                            risk_counts.get("CRITICAL", 0)
+                            + risk_counts.get("HIGH", 0)
+                        )
+                        if critical_high > 0:
+                            st.warning(
+                                f"**{critical_high} image{'s' if critical_high != 1 else ''} "
+                                f"flagged as Critical or High risk** — "
+                                f"these likely need replacement or licence verification.",
+                                icon="⚠️",
+                            )
+
+                        st.caption(
+                            "Download the HTML report above for full image-by-image "
+                            "detail with embedded thumbnails."
+                        )

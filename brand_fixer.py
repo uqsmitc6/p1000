@@ -20,6 +20,7 @@ Usage:
 import argparse
 import copy
 import json
+import re
 import sys
 from pathlib import Path
 from collections import defaultdict
@@ -227,9 +228,10 @@ def get_run_colour(run):
 class BrandFixer:
     """Applies UQ brand compliance fixes to a presentation."""
 
-    def __init__(self, prs, report=False):
+    def __init__(self, prs, report=False, footer_text=None):
         self.prs = prs
         self.report = report
+        self.footer_text = footer_text  # Optional: set all footers to this text
         self.stats = defaultdict(int)
         self.changes = []  # Detailed change log for report
 
@@ -508,10 +510,42 @@ class BrandFixer:
     # ── 4. Footer Standardisation ──────────────────────────────────
 
     def fix_footers(self):
-        """Ensure footer placeholders use consistent formatting."""
+        """Ensure footer placeholders use consistent formatting.
+
+        If self.footer_text is set, also replaces the text content of footer
+        placeholders (excluding slide number and date placeholders) with that text.
+        """
+        from pptx.enum.shapes import PP_PLACEHOLDER
+
         for slide_idx, slide in enumerate(self.prs.slides, 1):
             for shape in slide.shapes:
                 if is_placeholder_footer(shape) and shape.has_text_frame:
+                    # Set footer text if configured (only for FOOTER type, not slide numbers/dates)
+                    if self.footer_text is not None:
+                        try:
+                            ph_type = shape.placeholder_format.type
+                            if ph_type == PP_PLACEHOLDER.FOOTER:
+                                current_text = shape.text_frame.text.strip()
+                                if current_text != self.footer_text:
+                                    # Clear existing text and set new
+                                    for para in shape.text_frame.paragraphs:
+                                        for run in para.runs:
+                                            run.text = ""
+                                    # Set first run of first paragraph
+                                    if shape.text_frame.paragraphs:
+                                        para = shape.text_frame.paragraphs[0]
+                                        if para.runs:
+                                            para.runs[0].text = self.footer_text
+                                        else:
+                                            para.text = self.footer_text
+                                    self.log_change(
+                                        slide_idx,
+                                        "footer",
+                                        f"Footer text → '{self.footer_text}'",
+                                    )
+                        except (ValueError, AttributeError):
+                            pass  # Shape isn't a placeholder or doesn't have type
+
                     for para in shape.text_frame.paragraphs:
                         for run in para.runs:
                             font_name = get_run_font_name(run)
@@ -560,7 +594,67 @@ class BrandFixer:
                                     f"Title size {old_pt:.0f}pt → 44pt (was above maximum)",
                                 )
 
-    # ── 6. Bullet Style Consistency ────────────────────────────────
+    # ── 6. Body Text Size Check ────────────────────────────────────
+
+    BODY_SIZE_MIN = Pt(12)
+    BODY_SIZE_MAX = Pt(24)
+
+    # Patterns that indicate text is intentionally small (attributions, captions)
+    _SMALL_TEXT_EXCEPTIONS = re.compile(
+        r"(source:|image\s+(licensed|source)|adapted\s+from|"
+        r"photo\s+(?:by|credit)|cc\s+by|creative\s+commons|"
+        r"public\s+domain|wikimedia|adobe\s+stock|shutterstock|"
+        r"©|\d{4}\s+\w+\s+(pty|ltd|inc|corp)|all\s+rights\s+reserved)",
+        re.IGNORECASE,
+    )
+
+    def flag_body_text_sizes(self):
+        """Flag body text that falls outside the 14–24pt range.
+
+        This is a flag-only check — no auto-correction, since small or large
+        body text may be intentional (captions, callout boxes, etc.).
+        Excludes titles, footers, and attribution/caption text.
+        """
+        for slide_idx, slide in enumerate(self.prs.slides, 1):
+            for shape in slide.shapes:
+                # Skip titles and footers (handled separately)
+                if is_placeholder_title(shape) or is_placeholder_footer(shape):
+                    continue
+                if not shape.has_text_frame:
+                    continue
+
+                for para in shape.text_frame.paragraphs:
+                    for run in para.runs:
+                        size = run.font.size
+                        if size is None:
+                            continue
+
+                        text = run.text.strip()
+                        if not text:
+                            continue
+
+                        # Skip intentionally small text (attributions, captions)
+                        if self._SMALL_TEXT_EXCEPTIONS.search(text):
+                            continue
+
+                        pt_val = round(size / 12700, 1)
+
+                        if size < self.BODY_SIZE_MIN:
+                            self.log_change(
+                                slide_idx,
+                                "body_size_flagged",
+                                f"Body text at {pt_val}pt (below 14pt minimum) — "
+                                f"'{text[:50]}{'...' if len(text) > 50 else ''}'",
+                            )
+                        elif size > self.BODY_SIZE_MAX:
+                            self.log_change(
+                                slide_idx,
+                                "body_size_flagged",
+                                f"Body text at {pt_val}pt (above 24pt maximum) — "
+                                f"'{text[:50]}{'...' if len(text) > 50 else ''}'",
+                            )
+
+    # ── 7. Bullet Style Consistency ────────────────────────────────
 
     def fix_bullets(self):
         """Normalise bullet characters for consistency.
@@ -601,17 +695,19 @@ class BrandFixer:
 
     def fix_all(self):
         """Run all brand compliance fixes in order."""
-        print("  [1/6] Fixing fonts...")
+        print("  [1/7] Fixing fonts...")
         self.fix_fonts()
-        print("  [2/6] Fixing text colours...")
+        print("  [2/7] Fixing text colours...")
         self.fix_colours()
-        print("  [3/6] Restyling tables...")
+        print("  [3/7] Restyling tables...")
         self.fix_tables()
-        print("  [4/6] Standardising footers...")
+        print("  [4/7] Standardising footers...")
         self.fix_footers()
-        print("  [5/6] Normalising heading sizes...")
+        print("  [5/7] Normalising heading sizes...")
         self.fix_heading_sizes()
-        print("  [6/6] Fixing bullet styles...")
+        print("  [6/7] Checking body text sizes...")
+        self.flag_body_text_sizes()
+        print("  [7/7] Fixing bullet styles...")
         self.fix_bullets()
 
     def print_summary(self):
@@ -629,6 +725,7 @@ class BrandFixer:
             "table": "Tables restyled",
             "footer": "Footer fixes",
             "heading_size": "Heading size adjustments",
+            "body_size_flagged": "Body text sizes flagged",
             "bullet": "Bullet normalisations",
         }
         for key, label in categories.items():
@@ -663,6 +760,10 @@ def main():
         action="store_true",
         help="Generate a detailed JSON change report",
     )
+    parser.add_argument(
+        "--footer-text",
+        help="Set all footer placeholders to this text (e.g. 'UQ Business School')",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -689,7 +790,7 @@ def main():
 
     # Run fixes
     print("Applying brand fixes...")
-    fixer = BrandFixer(prs, report=args.report)
+    fixer = BrandFixer(prs, report=args.report, footer_text=args.footer_text)
     fixer.fix_all()
     total = fixer.print_summary()
 
