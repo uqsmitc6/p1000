@@ -1,7 +1,7 @@
 # Project Log — UQ Slide Compliance Tool
 
-> **Last updated:** 2026-04-09
-> **Project:** Two-part automated tool for UQ Business School executive education slide deck compliance — brand formatting fixer + copyright image audit
+> **Last updated:** 2026-04-09 (Session 5)
+> **Project:** Automated tool for UQ Business School executive education slide deck compliance — layout auto-apply + brand formatting fixer + copyright image audit
 > **Tech stack:** Python (python-pptx, Pillow, lxml), Claude Vision API (anthropic SDK), Streamlit UI, HTML reporting
 > **Repository:** Cowork project folder
 > **Live app:** https://p10004u.streamlit.app/
@@ -10,11 +10,11 @@
 
 ## Current State
 
-All four components are **built and functionally tested**, plus a **Streamlit web UI** (`app.py`) wraps all tools for non-technical users — now with four tabs: Brand Fixer, Image Audit, Reference Checker, and Full Compliance Check. App is **live on Streamlit Community Cloud** with API key configured. The combined pipeline runs all three checks in sequence from a single upload. Self-contained HTML image audit reports now embed images as base64 data URIs.
+All five components are **built and functionally tested**, plus a **Streamlit web UI** (`app.py`) wraps all tools for non-technical users — now with four tabs: Brand Fixer, Image Audit, Reference Checker, and Full Compliance Check. App is **live on Streamlit Community Cloud** with API key configured. The Full Compliance Check pipeline now runs: layout auto-apply → brand fixer → reference checker → image audit. Self-contained HTML image audit reports embed images as base64 data URIs.
 
 1. ~~**Too many "review manually" flags**~~ — FIXED. Expanded near-black colour detection (explicit hex list + luminance/saturation check). Flags reduced from 55 → 27, with remaining flags being genuine accent colours (greens, oranges, reds, blues) that do need manual review.
 2. ~~**Download button cleared the page**~~ — FIXED. Results now stored in `st.session_state` so they persist across Streamlit reruns triggered by download buttons.
-3. **Slide backgrounds/masters not applied** — OPEN. The brand fixer only modifies text-level properties (fonts, colours, bullets). It does not change slide backgrounds, layouts, or masters. This is architecturally significant — see Open Items for discussion.
+3. ~~**Slide backgrounds/masters not applied**~~ — FIXED via layout auto-apply (Session 5). The layout manager rebuilds every slide from scratch using the correct UQ template layout, giving correct backgrounds, decorative elements, and placeholder positions. 148/148 slides rebuilt successfully on BEFORE deck, 87 layouts corrected from legacy to canonical template names.
 
 ### Key Architecture Decisions in Effect
 
@@ -27,6 +27,7 @@ All four components are **built and functionally tested**, plus a **Streamlit we
 - Table restyling: first row always treated as header (UQ Purple bg, white text), alternating rows white/#D7D1CC — decided 2026-03-25
 - Bullet normalisation: only non-standard characters are changed; standard bullets (•, –, ▪, ►, etc.) are left as-is — decided 2026-03-25
 - Image audit uses Claude claude-sonnet-4-20250514 for classification — balances cost vs accuracy — decided 2026-03-25
+- Layout auto-apply: always rebuild from scratch (not patch) — every slide gets extracted → analysed → rebuilt from template. Two modes: name-mapping (fast, free) and AI Vision (Claude analyses slide images for best layout match) — decided 2026-04-09
 
 ---
 
@@ -44,12 +45,48 @@ All four components are **built and functionally tested**, plus a **Streamlit we
 | 8 | DONE | ~~Add `--footer-text` CLI option to brand_fixer.py~~ | 2026-03-25 | — | Added `--footer-text` CLI arg and `footer_text` param to BrandFixer constructor. Sets all FOOTER placeholder text to specified string. Tested: 146 footers updated on AFTER deck with "UQ Business School". |
 | 9 | DONE | ~~Add body text size check~~ | 2026-03-25 | — | Added `flag_body_text_sizes()` method. Flags body text outside 12–24pt range (flag-only, no auto-fix). Excludes titles, footers, and attribution text (detected via regex). 45 flags on BEFORE deck (8–10pt text). Added as step 6 in `fix_all()`, integrated into Streamlit UI and combined pipeline. |
 | 10 | NOTE | Image attribution convention in AFTER deck | 2026-03-25 | — | LDOs use on-slide text boxes with format "Source: Adobe Stock {ID}" or "Image licensed through Adobe Stock: {ID}". Also: "Source: {creator}, CC BY-SA 4.0, via Wikimedia Commons", "Source: Public domain, via Wikimedia Commons", "Images: Microsoft Stock", "Image licensed through Shutterstock: {ID}". Some slides also note attribution in speaker notes (slides 127, 144). |
-| 11 | TODO | Build layout auto-apply tool | 2026-04-09 | High | Analyse each slide's content (title, body, images, tables) and automatically assign the best-matching UQ template layout. Addresses feedback F1 (cover/subsection formatting) and F2 (text alignment). Sean chose analyse-and-auto-apply approach. Requires: unpacking all UQ template layouts, building content-to-layout matching rules per slide type, handling edge cases (multi-image slides, tables, etc.). This is the next major feature. |
-| 12 | TODO | Explore Streamlit upload size limit | 2026-04-09 | Low | Evie/Sarah asked about increasing the upload limit. Current Streamlit config may restrict large decks. Check .streamlit/config.toml settings. |
+| 11 | DONE | ~~Build layout auto-apply tool~~ | 2026-04-09 | — | Built `layout_manager.py` — full pipeline: LayoutRegistry (46 layouts catalogued), ContentExtractor (structured extraction from any slide), LayoutAnalyser (Claude Vision), SlideRebuilder (fresh rebuild from template), LayoutVerifier (Vision comparison). Two modes: name-mapping (fast, free) and AI Vision. Tested on full BEFORE deck: 148/148 rebuilt, 87 layouts corrected, 8.5/10 visual QA score. Integrated into combined pipeline as Step 0 (before brand fixer). |
+| 12 | DONE | ~~Explore Streamlit upload size limit~~ | 2026-04-09 | — | Confirmed 200MB limit in `.streamlit/config.toml`. Should be more than sufficient for any slide deck. |
+| 13 | TODO | Single upload workflow | 2026-04-09 | Medium | Currently each tab requires a separate file upload. Users should upload once and all tabs share the same file. Sean flagged this as a usability issue during testing. |
 
 ---
 
 ## Session History
+
+### Session 5 — 2026-04-09
+
+**Focus:** Build the layout auto-apply tool (Open Item #11). This was the most architecturally significant feature since the initial build.
+
+**Architecture decision: Always rebuild from scratch**
+Sean proposed (and we agreed) that every slide should be rebuilt from scratch rather than "patching" the layout reference. The rebuild approach: extract all content → determine best template layout → create fresh slide from template → populate placeholders → verify. This gives consistent, clean output with correct backgrounds and decorative elements.
+
+Two analysis modes:
+1. **Name mapping** (fast, free): Maps legacy layout names (e.g. `3_Title and Content`, `Section Divider 2`) to canonical template names. Covers 100% of BEFORE deck layouts.
+2. **AI Vision** (optional, API cost): Claude Vision analyses each slide image and recommends the best layout. More accurate for slides with unusual content mixes. Also includes a verification step comparing original vs rebuilt.
+
+**Outcomes:**
+- **Layout Registry**: Catalogued all 46 UQ template layouts with placeholder structures (type, position, size), background types, non-placeholder shapes, content slot mappings. Built name-mapping table covering all legacy/prefixed layout names found in the BEFORE deck.
+- **Content Extractor**: Extracts structured content from any slide — title, subtitle, body text blocks (with full paragraph/run formatting), images (bytes + metadata), tables (cell data + dimensions), speaker notes. Handles both placeholder-based and freeform content.
+- **Layout Analyser (Vision)**: Sends slide image + extraction summary to Claude Sonnet. Returns recommended layout, confidence score, content inventory, reasoning. Falls back to name mapping on error.
+- **Slide Rebuilder**: Creates fresh slide from target template layout, populates placeholders with extracted content. Handles title, subtitle, body text (with formatting), images (in placeholders or freeform), tables, attribution text, speaker notes. Always sets font to Arial for UQ compliance.
+- **Layout Verifier (Vision)**: Compares original and rebuilt slide images. Returns pass/fail, score, issues list.
+- **Full BEFORE deck test**: 148/148 slides rebuilt successfully, 87 layouts corrected from legacy to canonical names. Zero failures. Visual QA: 8.5/10 across representative sample (slides 1, 10, 25, 50, 100, 148).
+- **Combined pipeline integration**: Layout auto-apply runs as Step 0 before brand fixer. Pipeline is now: Layout → Brand → Refs → Images. UI updated with layout mode selector (Name mapping / AI Vision / Skip) and layout results display.
+- **Version bumped to 1.5.0**.
+
+**Key findings:**
+- BEFORE deck uses 38 unique layout names, of which 17 match the template exactly and 21 need mapping
+- Most unmapped layouts are prefixed duplicates: `1_`, `2_`, `3_`, `8_` prefixes from an older template version
+- 71 of 148 slides have freeform content (text boxes, images outside placeholders) — the rebuild approach handles this correctly
+- LibreOffice renders 133 of 148 slides (some complex slides are skipped), which is sufficient for Vision analysis
+
+**Changes to codebase:**
+- `layout_manager.py`: NEW — ~1000 lines. LayoutRegistry, ContentExtractor, SlideRenderer, LayoutAnalyser, SlideRebuilder, LayoutVerifier, LayoutManager orchestrator
+- `combined_pipeline.py`: Added layout auto-apply as Step 0, new params `skip_layout` and `skip_layout_vision`, layout report in results
+- `app.py`: Version 1.5.0. Added layout mode selector to Full Compliance Check tab, layout stats in overview, layout details expander with per-slide change list
+- `PROJECT_LOG.md`: Updated current state, Open Item #11 → DONE, Session 5 history
+
+---
 
 ### Session 4 — 2026-04-09
 
@@ -78,17 +115,22 @@ Issues triaged and categorised:
 - **Table header text fix**: Header row text now explicitly set to white even when theme-inherited. Previously purple background was applied but text stayed inherited (black), making it unreadable. 9 header text runs fixed on BEFORE deck.
 - **Image audit prompt improvements**: Added priority guide (published diagrams > decorative photos), government/corporate screenshot handling, alt text generation field.
 - **Alt text generation**: Classification prompt now generates suggested alt text (max 125 chars) for each image. Shown in both HTML report and Streamlit image cards. No extra API cost — same call.
-- **Version number**: Added `APP_VERSION` to app.py header. v1.3.0 → v1.4.0.
+- **Version number**: Added `APP_VERSION` to app.py header. v1.3.0 → v1.4.0 → v1.4.1.
 - **Live app URL**: Recorded as https://p10004u.streamlit.app/
+- **Persistent cost tracking**: Built `cost_logger.py` — dual-layer logging (session state + Google Sheets). Sidebar Admin section shows per-run breakdown. Google Cloud service account created (`slide-tool-logger@graphical-petal-266723.iam.gserviceaccount.com`), Sheets API enabled, credentials added to Streamlit Cloud secrets. Tested end-to-end: 6 images, $0.0666, logged to Google Sheet successfully.
+- **Google Sheet**: "Slide Tool Cost Log" at https://docs.google.com/spreadsheets/d/1xtiLG5X_iiJ3J3JO4cfX-BFySfmMssm86QPE7Bt_l58/edit — columns: Timestamp, Tool, Filename, Images, Input Tokens, Output Tokens, Cost USD, User.
+- **Upload size limit**: Confirmed at 200MB in `.streamlit/config.toml` — should be sufficient for any slide deck.
 
 **Key decision: Layout auto-apply tool**
 Sean wants to build a tool that analyses each slide's content and automatically assigns the best-matching UQ template layout. This addresses feedback items F1 and F2. Approach: analyse → auto-apply (not just recommend). This is the next major feature — see Open Item #11.
 
 **Changes to codebase:**
 - `brand_fixer.py`: Title colours explicitly set for theme-inherited text; table header text explicitly set to white; both fixes prevent colour issues after layout changes
-- `image_audit.py`: Classification prompt updated with priority guide, gov/corporate screenshot rules, and alt text generation field; HTML report shows alt text
-- `app.py`: Version bumped to 1.4.0; version number shown in header; alt text shown in image cards
-- `PROJECT_LOG.md`: Full feedback triage, Session 4 history, new open item #11
+- `image_audit.py`: Classification prompt updated with priority guide, gov/corporate screenshot rules, and alt text generation field; HTML report shows alt text; added cost constants and calculation
+- `app.py`: Version bumped to 1.4.1; version number shown in header; alt text shown in image cards; added cost logging calls and sidebar admin render
+- `cost_logger.py`: NEW — persistent cost logging via Google Sheets (gspread + google-auth), session state fallback, sidebar admin display
+- `requirements.txt`: Added gspread, google-auth
+- `PROJECT_LOG.md`: Full feedback triage, Session 4 history, new open items #11, #12
 
 ---
 
@@ -290,7 +332,8 @@ Sean wants to build a tool that analyses each slide's content and automatically 
 | 2026-03-25 | Use claude-sonnet-4-20250514 for image classification | Best cost/quality balance for vision tasks. At ~$3/1M input tokens + $15/1M output tokens, a 75-image deck costs ~$0.50-1.00. | Claude Opus (more accurate but 5x cost); Claude Haiku (cheaper but less reliable on nuanced classification) | Active |
 | 2026-03-25 | Conservative bullet normalisation | Only fix truly weird characters (§). LDOs may have intentional bullet styles. More aggressive normalisation risks breaking visual consistency. | Normalise all to one character; leave all alone | Active |
 | 2026-03-25 | Image deduplication by SHA-256 hash | Avoids classifying identical images multiple times (saves API cost). First occurrence is reported with its slide number. | Report every instance (more complete but more expensive); deduplicate by visual similarity (complex) | Active |
-| 2026-03-25 | Slide backgrounds/masters left out of scope | Placeholder indices match between BEFORE deck and UQ template. LDO manually selects correct layout; text repositions automatically. Automating layout selection carries high risk of breaking content positioning and is ultimately a design judgement. | Auto-apply matching layouts by name; flag non-matching backgrounds only; full template remapping | Active |
+| 2026-03-25 | ~~Slide backgrounds/masters left out of scope~~ | ~~Placeholder indices match between BEFORE deck and UQ template.~~ | — | **Superseded** by layout auto-apply (Session 5) |
+| 2026-04-09 | Layout auto-apply: always rebuild from scratch | Patching layout references is fragile (71/148 slides have freeform content). Rebuilding from scratch gives consistent output with correct backgrounds, decorative elements, and placeholder positions. Two analysis modes: name mapping (fast/free) and AI Vision (accurate/paid). | Patch layout reference only; patch + rebuild hybrid; heuristic-only matching | Active |
 
 ---
 
@@ -338,7 +381,8 @@ P-1000/
 ├── brand_fixer.py                                        — [DONE] Step 1 brand compliance script
 ├── image_audit.py                                        — [DONE] Step 2 image audit script (needs API key for classification)
 ├── ref_checker.py                                        — [DONE] Step 3 APA 7 reference & attribution checker
-├── combined_pipeline.py                                  — [DONE] Combined pipeline (brand + ref + image in one run)
+├── layout_manager.py                                     — [DONE] Layout auto-apply (registry, extractor, Vision analyser, rebuilder, verifier)
+├── combined_pipeline.py                                  — [DONE] Combined pipeline (layout + brand + ref + image in one run)
 ├── Powerpoints/
 │   ├── UQ PPT Template - February 2026.pptx              — Canonical UQ template (46 layouts)
 │   ├── Advanced Change Management BEFORE.pptx            — Example messy deck (148 slides, 75 images)
@@ -351,7 +395,8 @@ P-1000/
 
 ## Changelog
 
-- **2026-04-09** — BUGFIX + FEATURE — Session 4: Fixed title colour (explicitly set UQ Purple for theme-inherited titles). Fixed table header text (explicitly set white on purple headers). Updated image classifier: priority guide for diagrams vs decorative, gov/corporate screenshot handling, alt text generation. Added version number to app header (v1.4.0). Triaged Evie & Sarah's testing feedback (12 items).
+- **2026-04-09** — FEATURE (MAJOR) — Session 5: Built layout auto-apply tool (`layout_manager.py`). Full rebuild-from-scratch architecture: extract content → determine best template layout → create fresh slide → populate → verify. Two modes: name mapping (free) and AI Vision (API). Registry covers all 46 UQ template layouts. Tested on full BEFORE deck: 148/148 rebuilt, 87 layouts corrected. Visual QA 8.5/10. Integrated into combined pipeline as Step 0. App bumped to v1.5.0.
+- **2026-04-09** — BUGFIX + FEATURE — Session 4: Fixed title colour (explicitly set UQ Purple for theme-inherited titles). Fixed table header text (explicitly set white on purple headers). Updated image classifier: priority guide for diagrams vs decorative, gov/corporate screenshot handling, alt text generation. Added version number to app header (v1.4.0 → v1.4.1). Triaged Evie & Sarah's testing feedback (12 items). Built persistent cost tracking (`cost_logger.py`) with Google Sheets backend — service account, Sheets API, Streamlit secrets all configured and tested. Confirmed upload limit at 200MB.
 - **2026-03-26 09:00** — FEATURE — Session 3: Overhauled image classification prompt for Adobe Stock/Shutterstock/Microsoft Stock licence awareness. Added `_detect_attribution()` for pre-classification attribution scanning. Added `--footer-text` CLI option and `footer_text` param. Added `flag_body_text_sizes()` body text size check (12–24pt, flag-only). All integrated into Streamlit UI and combined pipeline.
 - **2026-03-26 08:00** — FEATURE — Session 2c: Built combined pipeline (`combined_pipeline.py`) running brand fixer → ref checker → image audit in one go. Added as fourth Streamlit tab "Full Compliance Check". Made HTML image audit reports self-contained with base64 embedded images. All features tested end-to-end.
 - **2026-03-25 20:00** — FEATURE — Session 2b: Built APA 7 Reference & Attribution Checker (`ref_checker.py`). Scans citations, references, image attributions. Auto-fixes attribution formatting and citation style. Cross-references citations vs reference list. Added as third Streamlit tab. Tested on both BEFORE and AFTER decks.

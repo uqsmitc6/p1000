@@ -27,18 +27,22 @@ from pptx import Presentation
 from brand_fixer import BrandFixer
 from ref_checker import RefChecker
 from image_audit import extract_images, classify_image, generate_html_report
+from layout_manager import LayoutManager
 
 
 def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
-                 skip_image_audit=False, progress_callback=None):
+                 skip_image_audit=False, skip_layout=True,
+                 skip_layout_vision=False, progress_callback=None):
     """Run the full compliance pipeline on a PPTX file.
 
     Args:
         pptx_bytes: Raw bytes of the input PPTX file
         filename: Original filename (for reporting)
-        api_key: Anthropic API key (required for image audit classification)
+        api_key: Anthropic API key (required for image audit + layout Vision)
         image_limit: Limit number of images to classify (0 or None = all)
         skip_image_audit: If True, skip image audit entirely
+        skip_layout: If True, skip layout auto-apply entirely
+        skip_layout_vision: If True, use name-mapping only (no Vision calls)
         progress_callback: Optional callable(percent, message) for progress updates
 
     Returns:
@@ -48,55 +52,111 @@ def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
             ref_report: Reference checker report dict
             image_report: Image audit report dict (or None if skipped)
             image_html: Self-contained HTML report string (or None)
+            layout_report: Layout auto-apply report dict (or None if skipped)
             summary: Unified summary dict
     """
     def progress(pct, msg):
         if progress_callback:
             progress_callback(pct, msg)
 
-    # ── Step 1: Brand Fixer ──────────────────────────────────────────
-    progress(0, "Step 1/3: Fixing brand formatting...")
+    layout_report = None
 
-    # Load presentation from bytes
+    # ── Step 0: Layout Auto-Apply ────────────────────────────────────
+    if not skip_layout:
+        progress(0, "Step 0/3: Applying UQ template layouts...")
+
+        try:
+            lm = LayoutManager(api_key=api_key)
+
+            def layout_progress(step, detail, layout_pct):
+                # Map layout progress (0-1) to pipeline progress (0-20%)
+                mapped_pct = int(layout_pct * 20)
+                progress(mapped_pct, f"Layout: {detail}")
+
+            layout_result = lm.run_pipeline(
+                pptx_bytes,
+                progress_callback=layout_progress,
+                skip_vision=skip_layout_vision,
+                skip_verification=skip_layout_vision,  # Skip verification if no Vision
+            )
+
+            # Use the rebuilt PPTX as input for subsequent steps
+            pptx_bytes = layout_result["output_pptx_bytes"]
+
+            layout_report = {
+                "total_slides": layout_result["summary"]["total_slides"],
+                "rebuilt": layout_result["summary"]["rebuilt"],
+                "failed": layout_result["summary"]["failed"],
+                "low_confidence": layout_result["summary"]["low_confidence"],
+                "cost_usd": layout_result["summary"]["total_cost_usd"],
+                "tokens": {
+                    "input": layout_result["summary"]["total_input_tokens"],
+                    "output": layout_result["summary"]["total_output_tokens"],
+                },
+                "results": [
+                    {
+                        "slide": r.slide_number,
+                        "from": r.original_layout,
+                        "to": r.recommended_layout,
+                        "confidence": r.confidence,
+                        "status": r.status,
+                        "changed": r.original_layout != r.recommended_layout,
+                    }
+                    for r in layout_result["results"]
+                ],
+            }
+
+            changed = sum(1 for r in layout_result["results"]
+                         if r.original_layout != r.recommended_layout)
+            progress(20, f"Layout: {layout_result['summary']['rebuilt']} rebuilt, {changed} layouts changed")
+
+        except Exception as e:
+            layout_report = {"error": str(e)}
+            progress(20, f"Layout: Error — {e}")
+
+    # ── Step 1: Brand Fixer ──────────────────────────────────────────
+    progress(20, "Step 1/3: Fixing brand formatting...")
+
+    # Load presentation from bytes (may be layout-rebuilt or original)
     prs = Presentation(io.BytesIO(pptx_bytes))
     fixer = BrandFixer(prs, report=True)
 
-    progress(5, "Fixing fonts...")
+    progress(22, "Fixing fonts...")
     fixer.fix_fonts()
-    progress(10, "Fixing text colours...")
+    progress(25, "Fixing text colours...")
     fixer.fix_colours()
-    progress(15, "Restyling tables...")
+    progress(28, "Restyling tables...")
     fixer.fix_tables()
-    progress(18, "Standardising footers...")
+    progress(30, "Standardising footers...")
     fixer.fix_footers()
-    progress(20, "Normalising heading sizes...")
+    progress(32, "Normalising heading sizes...")
     fixer.fix_heading_sizes()
-    progress(21, "Checking body text sizes...")
+    progress(33, "Checking body text sizes...")
     fixer.flag_body_text_sizes()
-    progress(22, "Fixing bullet styles...")
+    progress(34, "Fixing bullet styles...")
     fixer.fix_bullets()
 
     brand_report = fixer.generate_report()
-    progress(25, f"Brand fixer: {brand_report['total_changes']} changes")
+    progress(35, f"Brand fixer: {brand_report['total_changes']} changes")
 
     # ── Step 2: Reference Checker ────────────────────────────────────
-    progress(25, "Step 2/3: Checking references & attributions...")
+    progress(35, "Step 2/3: Checking references & attributions...")
 
     checker = RefChecker(prs, report=True)
-    progress(28, "Scanning citations...")
+    progress(36, "Scanning citations...")
     checker.scan_citations()
-    progress(31, "Scanning reference lists...")
+    progress(37, "Scanning reference lists...")
     checker.scan_references()
-    progress(34, "Checking image attributions...")
+    progress(38, "Checking image attributions...")
     checker.scan_attributions()
-    progress(37, "Cross-referencing...")
+    progress(39, "Cross-referencing...")
     checker.cross_reference()
-    progress(39, "Applying reference fixes...")
+    progress(40, "Applying reference fixes...")
     checker.fix_attributions()
     checker.fix_citations()
 
     ref_report = checker.generate_report()
-    progress(40, f"Reference checker: {ref_report['total_issues']} issues, {ref_report['total_changes']} fixes")
+    progress(42, f"Reference checker: {ref_report['total_issues']} issues, {ref_report['total_changes']} fixes")
 
     # ── Save fixed PPTX ─────────────────────────────────────────────
     output_buffer = io.BytesIO()
@@ -239,6 +299,12 @@ def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
         "filename": filename,
         "num_slides": num_slides,
         "generated": datetime.now().isoformat(),
+        "layout": {
+            "rebuilt": layout_report.get("rebuilt", 0) if layout_report else 0,
+            "failed": layout_report.get("failed", 0) if layout_report else 0,
+            "changed": sum(1 for r in layout_report.get("results", []) if r.get("changed"))
+                       if layout_report and "results" in layout_report else 0,
+        } if layout_report else None,
         "brand": {
             "total_changes": brand_report["total_changes"],
             "summary": brand_report["summary"],
@@ -264,5 +330,6 @@ def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
         "image_report": image_report,
         "image_html": image_html,
         "image_data": image_data,
+        "layout_report": layout_report,
         "summary": summary,
     }

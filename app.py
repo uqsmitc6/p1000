@@ -13,7 +13,7 @@ Deployment:
   Set ANTHROPIC_API_KEY in Streamlit Cloud secrets
 """
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 
 import io
 import json
@@ -1094,14 +1094,15 @@ with tab4:
 
     st.markdown("""
     <div class="info-box">
-        <strong>What this does:</strong> Runs all three compliance checks in sequence:
+        <strong>What this does:</strong> Runs all compliance checks in sequence:
         <ol style="margin: 0.5rem 0 0 1.2rem; font-size: 0.9rem;">
+            <li><strong>Layout Auto-Apply</strong> — rebuilds each slide using the correct UQ template layout</li>
             <li><strong>Brand Fixer</strong> — fonts, colours, tables, footers, headings, bullets</li>
             <li><strong>Reference Checker</strong> — citations, reference lists, image attributions</li>
             <li><strong>Image Audit</strong> — copyright risk classification for every image</li>
         </ol>
         <br/>
-        You'll get a single fixed PPTX (brand + reference fixes applied), a self-contained
+        You'll get a single fixed PPTX (layout + brand + reference fixes applied), a self-contained
         HTML image audit report, and a unified compliance summary — all from one upload.
     </div>
     """, unsafe_allow_html=True)
@@ -1117,7 +1118,7 @@ with tab4:
         file_size_mb = len(combo_file.getvalue()) / (1024 * 1024)
         st.caption(f"Uploaded: **{combo_file.name}** ({file_size_mb:.1f} MB)")
 
-        col_opt1, col_opt2 = st.columns(2)
+        col_opt1, col_opt2, col_opt3 = st.columns(3)
         with col_opt1:
             combo_img_limit = st.number_input(
                 "Limit images (0 = all)",
@@ -1132,6 +1133,16 @@ with tab4:
                 "Skip image audit (brand + refs only)",
                 key="combo_skip_images",
                 help="Run brand fixer and reference checker only — no AI image classification.",
+            )
+        with col_opt3:
+            combo_layout_mode = st.selectbox(
+                "Layout auto-apply (beta)",
+                options=["Skip", "Name mapping (fast, free)", "AI Vision (uses API)"],
+                index=0,
+                key="combo_layout_mode",
+                help="Skip: don't apply layouts (default — existing behaviour). "
+                     "Name mapping: match layouts by name and rebuild slides from UQ template (fast, free). "
+                     "AI Vision: Claude analyses each slide image for best layout (most accurate, uses API credits).",
             )
 
         if st.button("Run Full Compliance Check", type="primary", key="run_combo"):
@@ -1152,12 +1163,17 @@ with tab4:
                 status_text.markdown(f"**{msg}**")
 
             try:
+                skip_layout = combo_layout_mode == "Skip"
+                skip_layout_vision = combo_layout_mode != "AI Vision (uses API)"
+
                 results = run_pipeline(
                     pptx_bytes=combo_file.getvalue(),
                     filename=combo_file.name,
-                    api_key=api_key if not combo_skip_images else None,
+                    api_key=api_key if (not combo_skip_images or not skip_layout_vision) else None,
                     image_limit=combo_img_limit if combo_img_limit > 0 else None,
                     skip_image_audit=combo_skip_images,
+                    skip_layout=skip_layout,
+                    skip_layout_vision=skip_layout_vision,
                     progress_callback=combo_progress,
                 )
 
@@ -1176,6 +1192,18 @@ with tab4:
                         cost_usd=ir["cost_usd"],
                     )
 
+                # Log layout cost if applicable
+                lr = results.get("layout_report")
+                if lr and lr.get("cost_usd"):
+                    log_cost(
+                        tool="Layout Auto-Apply",
+                        filename=combo_file.name,
+                        num_images=lr.get("total_slides", 0),
+                        input_tokens=lr.get("tokens", {}).get("input", 0),
+                        output_tokens=lr.get("tokens", {}).get("output", 0),
+                        cost_usd=lr["cost_usd"],
+                    )
+
                 # Store in session state
                 st.session_state["combo_result"] = {
                     "output_bytes": results["output_bytes"],
@@ -1184,6 +1212,7 @@ with tab4:
                     "image_report": results["image_report"],
                     "image_html": results["image_html"],
                     "image_data": results["image_data"],
+                    "layout_report": results.get("layout_report"),
                     "summary": results["summary"],
                     "source_name": combo_file.name,
                     "fixed_name": combo_file.name.replace(".pptx", "_COMPLIANT.pptx"),
@@ -1203,26 +1232,45 @@ with tab4:
             brand_report = cr["brand_report"]
             ref_report = cr["ref_report"]
             image_report = cr["image_report"]
+            layout_report = cr.get("layout_report")
 
             st.markdown("---")
             st.markdown("### Compliance Summary")
 
             # ── Overview stats ──
-            cols = st.columns(4)
+            cols = st.columns(5)
             cols[0].markdown(
                 f"<div class='stat-card'>"
                 f"<div class='number' style='color:#51247A;'>{summary['num_slides']}</div>"
                 f"<div class='label'>Slides</div></div>",
                 unsafe_allow_html=True,
             )
-            cols[1].markdown(
+
+            # Layout stats
+            if summary.get("layout"):
+                layout_changed = summary["layout"].get("changed", 0)
+                cols[1].markdown(
+                    f"<div class='stat-card'>"
+                    f"<div class='number' style='color:#962A8B;'>{layout_changed}</div>"
+                    f"<div class='label'>Layouts fixed</div></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                cols[1].markdown(
+                    f"<div class='stat-card'>"
+                    f"<div class='number' style='color:#999;'>—</div>"
+                    f"<div class='label'>Layouts (skipped)</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+            cols[2].markdown(
                 f"<div class='stat-card'>"
                 f"<div class='number' style='color:#4085C6;'>"
                 f"{summary['brand']['total_changes']}</div>"
                 f"<div class='label'>Brand fixes</div></div>",
                 unsafe_allow_html=True,
             )
-            cols[2].markdown(
+            cols[3].markdown(
                 f"<div class='stat-card'>"
                 f"<div class='number' style='color:#16A34A;'>"
                 f"{summary['references']['total_changes']}</div>"
@@ -1230,7 +1278,7 @@ with tab4:
                 unsafe_allow_html=True,
             )
             if summary.get("images"):
-                cols[3].markdown(
+                cols[4].markdown(
                     f"<div class='stat-card'>"
                     f"<div class='number' style='color:#D97706;'>"
                     f"{summary['images']['total_images']}</div>"
@@ -1238,7 +1286,7 @@ with tab4:
                     unsafe_allow_html=True,
                 )
             else:
-                cols[3].markdown(
+                cols[4].markdown(
                     f"<div class='stat-card'>"
                     f"<div class='number' style='color:#999;'>—</div>"
                     f"<div class='label'>Images (skipped)</div></div>",
@@ -1292,6 +1340,51 @@ with tab4:
                         mime="text/html",
                     )
                     st.caption("Self-contained with embedded images")
+
+            # ── Layout Auto-Apply Details ──
+            if layout_report and "results" in layout_report:
+                st.markdown("---")
+                changed_layouts = [r for r in layout_report["results"] if r.get("changed")]
+                with st.expander(
+                    f"📐 Layout Auto-Apply — {layout_report['rebuilt']} rebuilt, "
+                    f"{len(changed_layouts)} layouts changed",
+                    expanded=False,
+                ):
+                    if layout_report.get("error"):
+                        st.error(f"Layout error: {layout_report['error']}")
+                    elif not changed_layouts:
+                        st.success("All slides already using correct UQ template layouts!", icon="✅")
+                    else:
+                        lcols = st.columns(3)
+                        lcols[0].markdown(
+                            f"<div class='stat-card'>"
+                            f"<div class='number' style='color:#962A8B;'>{layout_report['rebuilt']}</div>"
+                            f"<div class='label'>Rebuilt</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                        lcols[1].markdown(
+                            f"<div class='stat-card'>"
+                            f"<div class='number' style='color:#4085C6;'>{len(changed_layouts)}</div>"
+                            f"<div class='label'>Changed</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                        lcols[2].markdown(
+                            f"<div class='stat-card'>"
+                            f"<div class='number' style='color:#E62645;'>{layout_report.get('failed', 0)}</div>"
+                            f"<div class='label'>Failed</div></div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        st.markdown("**Layout changes:**")
+                        for r in changed_layouts:
+                            conf = f"{r['confidence']:.0%}" if r.get('confidence') else "?"
+                            st.markdown(
+                                f"<div class='change-item change-colour'>"
+                                f"Slide {r['slide']}: "
+                                f"<code>{r['from']}</code> → <code>{r['to']}</code> "
+                                f"(confidence: {conf})</div>",
+                                unsafe_allow_html=True,
+                            )
 
             # ── Brand Fixer Details ──
             st.markdown("---")
