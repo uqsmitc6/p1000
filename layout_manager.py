@@ -48,8 +48,7 @@ except ImportError:
 
 UQ_TEMPLATE_PATH = os.path.join(
     os.path.dirname(__file__),
-    "Powerpoints",
-    "UQ PPT Template - February 2026.pptx",
+    "uq_template.pptx",
 )
 
 # Classification model for Vision calls

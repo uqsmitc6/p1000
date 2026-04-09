@@ -304,6 +304,7 @@ def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
             "failed": layout_report.get("failed", 0) if layout_report else 0,
             "changed": sum(1 for r in layout_report.get("results", []) if r.get("changed"))
                        if layout_report and "results" in layout_report else 0,
+            "error": layout_report.get("error") if layout_report else None,
         } if layout_report else None,
         "brand": {
             "total_changes": brand_report["total_changes"],

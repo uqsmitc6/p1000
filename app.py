@@ -1248,13 +1248,23 @@ with tab4:
 
             # Layout stats
             if summary.get("layout"):
-                layout_changed = summary["layout"].get("changed", 0)
-                cols[1].markdown(
-                    f"<div class='stat-card'>"
-                    f"<div class='number' style='color:#962A8B;'>{layout_changed}</div>"
-                    f"<div class='label'>Layouts fixed</div></div>",
-                    unsafe_allow_html=True,
-                )
+                layout_err = summary["layout"].get("error")
+                if layout_err:
+                    cols[1].markdown(
+                        f"<div class='stat-card'>"
+                        f"<div class='number' style='color:#E62645;'>!</div>"
+                        f"<div class='label'>Layout error</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.warning(f"Layout auto-apply failed: {layout_err}")
+                else:
+                    layout_changed = summary["layout"].get("changed", 0)
+                    cols[1].markdown(
+                        f"<div class='stat-card'>"
+                        f"<div class='number' style='color:#962A8B;'>{layout_changed}</div>"
+                        f"<div class='label'>Layouts fixed</div></div>",
+                        unsafe_allow_html=True,
+                    )
             else:
                 cols[1].markdown(
                     f"<div class='stat-card'>"
