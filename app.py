@@ -13,7 +13,7 @@ Deployment:
   Set ANTHROPIC_API_KEY in Streamlit Cloud secrets
 """
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 
 import io
 import json
@@ -1384,6 +1384,13 @@ with tab4:
                     "brand": brand_report,
                     "references": ref_report,
                 }
+                # Include v5 engine reports if present
+                if cr.get("layout_report"):
+                    json_summary["layout_report"] = cr["layout_report"]
+                if cr.get("design_report"):
+                    json_summary["design_report"] = cr["design_report"]
+                if cr.get("qa_report"):
+                    json_summary["qa_report"] = cr["qa_report"]
                 if image_report:
                     # Include image report without raw classification data to keep JSON manageable
                     json_summary["images"] = {

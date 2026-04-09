@@ -690,6 +690,10 @@ def select_layout(content: SlideContent, available_layouts: Dict[str, Any]) -> s
     # Start with the type-based default
     preferred = SLIDE_TYPE_TO_LAYOUT.get(content.slide_type, "Title and Content")
 
+    # Refine for acknowledgement slides with images → half-half layout
+    if content.slide_type == "acknowledgement" and content.has_images:
+        preferred = "Text with Image Half"
+
     # Refine for image content
     if content.slide_type == "content_with_image":
         images = content.content_images
@@ -1029,12 +1033,26 @@ def _insert_image_into_placeholder(placeholder, img: ExtractedImage):
 
 
 def _add_remaining_images(slide, images: List[ExtractedImage], layout_name: str):
-    """Add extra images as freeform shapes positioned in the content area."""
-    # Position in the lower portion of the content area
-    content_top = Emu(2.5 * 914400)  # Below title area
+    """Add extra images as freeform shapes positioned in the content area.
+
+    Tries to avoid overlapping existing text by finding the lowest text shape
+    and placing images below it.
+    """
+    # Find the bottom-most text shape so we can place images below it
+    lowest_text_bottom = Emu(2.5 * 914400)  # default: below title area
+    for shape in slide.shapes:
+        if shape.has_text_frame and shape.text_frame.text.strip():
+            shape_bottom = shape.top + shape.height
+            if shape_bottom > lowest_text_bottom:
+                lowest_text_bottom = shape_bottom
+
+    # Add a small gap below text
+    content_top = lowest_text_bottom + Emu(0.25 * 914400)
     content_left = Emu(0.52 * 914400)
+    # Calculate available height below the text
+    slide_bottom = Emu(7.1 * 914400)  # ~7.1 inches (standard 16:9 height minus margin)
+    available_height = max(slide_bottom - content_top, Emu(1.5 * 914400))
     max_width = Emu(12 * 914400)
-    max_height = Emu(4 * 914400)
 
     # Distribute images horizontally
     num_images = len(images)
@@ -1042,11 +1060,11 @@ def _add_remaining_images(slide, images: List[ExtractedImage], layout_name: str)
         return
 
     img_width = min(max_width // num_images, Emu(5 * 914400))
-    img_height = min(max_height, Emu(3.5 * 914400))
+    img_height = min(available_height, Emu(3.5 * 914400))
 
     for i, img in enumerate(images[:4]):  # Max 4 extra images
         left = content_left + i * (img_width + Emu(0.2 * 914400))
-        top = content_top + Emu(2 * 914400)  # Below text
+        top = content_top
 
         try:
             with tempfile.NamedTemporaryFile(
@@ -1284,8 +1302,12 @@ def clear_unused_placeholders(slide, content: SlideContent, layout_name: str):
                 if role in ph_map:
                     used_indices.add(ph_map[role])
 
-    # Clear unused placeholders
-    for ph in slide.placeholders:
+    # Remove unused placeholders entirely from the slide XML.
+    # Just clearing text isn't enough — template placeholders inherit default
+    # text (e.g. "Click to add text", "[Subtitle]", "Insert entity name here")
+    # from the slide layout. The only reliable fix is to DELETE the placeholder
+    # element from the slide's shape tree so it can't render anything.
+    for ph in list(slide.placeholders):  # list() — we're modifying the tree
         try:
             idx = ph.placeholder_format.idx
             ptype = str(ph.placeholder_format.type) if ph.placeholder_format.type else ""
@@ -1294,34 +1316,14 @@ def clear_unused_placeholders(slide, content: SlideContent, layout_name: str):
             if any(skip in ptype for skip in ['FOOTER', 'SLIDE_NUMBER', 'DATE_TIME']):
                 continue
 
-            # If this placeholder wasn't used, clear it
+            # If this placeholder wasn't used, REMOVE it from the slide
             if idx not in used_indices:
-                if ph.has_text_frame:
-                    ph.text_frame.clear()
-                    # Also try to make the placeholder invisible
-                    # by removing its default text
-                    _clear_placeholder_default_text(ph)
+                sp = ph._element
+                parent = sp.getparent()
+                if parent is not None:
+                    parent.remove(sp)
         except (ValueError, AttributeError):
             pass
-
-
-def _clear_placeholder_default_text(placeholder):
-    """Remove default/ghost text from an unused placeholder."""
-    try:
-        sp = placeholder._element
-        # Clear all <a:p> elements to remove "Click to add..." text
-        a_ns = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
-        txBody = sp.find(f'{a_ns}txBody')
-        if txBody is not None:
-            for p in txBody.findall(f'{a_ns}p'):
-                # Remove all runs
-                for r in p.findall(f'{a_ns}r'):
-                    p.remove(r)
-                # Remove endParaRPr default text
-                for endPara in p.findall(f'{a_ns}endParaRPr'):
-                    pass  # Keep endParaRPr but ensure no text
-    except Exception:
-        pass
 
 
 # ============================================================================
@@ -1371,6 +1373,187 @@ def analyse_design(content: SlideContent) -> List[str]:
 
     content.design_flags = flags
     return flags
+
+
+# ============================================================================
+# Fixed Slides — copied verbatim from template, never reconstructed
+# ============================================================================
+
+# The Acknowledgement of Country text is fixed across ALL UQ exec-ed decks.
+_AOC_TITLE = "Acknowledgement\nof Country"
+_AOC_BODY = (
+    "The University of Queensland (UQ) acknowledges the Traditional Owners "
+    "and their custodianship of the lands on which we meet.\n\n"
+    "We pay our respects to their Ancestors and their descendants, who "
+    "continue cultural and spiritual connections to Country.\n\n"
+    "We recognise their valuable contributions to Australian and global society."
+)
+_AOC_ATTRIBUTION = (
+    "The Brisbane River pattern from A Guidance Through Time\n"
+    "by Casey Coolwell and Kyra Mancktelow."
+)
+
+# Template slide index for the AoC slide (0-based)
+_AOC_TEMPLATE_SLIDE_IDX = 24  # Slide 25 in 1-based counting
+
+
+def _extract_aoc_image(prs):
+    """Extract the Aboriginal art image from the AoC template slide.
+
+    Returns dict with image bytes, content_type, and position,
+    or None if not found.
+    """
+    try:
+        if len(prs.slides) <= _AOC_TEMPLATE_SLIDE_IDX:
+            return None
+        slide = prs.slides[_AOC_TEMPLATE_SLIDE_IDX]
+        for shape in slide.shapes:
+            if hasattr(shape, 'image'):
+                try:
+                    return {
+                        "blob": shape.image.blob,
+                        "content_type": shape.image.content_type,
+                        "left": shape.left,
+                        "top": shape.top,
+                        "width": shape.width,
+                        "height": shape.height,
+                    }
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return None
+
+
+def _build_aoc_slide(target_prs, available_layouts, aoc_image_data):
+    """Build a fixed Acknowledgement of Country slide.
+
+    Uses the "Text with Image Half" layout and injects the standard
+    AoC text + the Aboriginal art image extracted from the template.
+    Returns the new slide, or None on failure.
+    """
+    layout_name = "Text with Image Half"
+    layout = available_layouts.get(layout_name)
+    if not layout:
+        return None, layout_name
+
+    slide = target_prs.slides.add_slide(layout)
+
+    # Build placeholders dict
+    placeholders = {}
+    for ph in slide.placeholders:
+        placeholders[ph.placeholder_format.idx] = ph
+
+    ph_map = PLACEHOLDER_MAP.get(layout_name, {})
+
+    # --- Title ---
+    if "title" in ph_map and ph_map["title"] in placeholders:
+        ph = placeholders[ph_map["title"]]
+        ph.text_frame.clear()
+        ph.text_frame.text = _AOC_TITLE
+
+    # --- Body text ---
+    if "body" in ph_map and ph_map["body"] in placeholders:
+        ph = placeholders[ph_map["body"]]
+        ph.text_frame.clear()
+        # Split into paragraphs at double-newline
+        paragraphs = _AOC_BODY.split("\n\n")
+        for i, para_text in enumerate(paragraphs):
+            if i == 0:
+                ph.text_frame.text = para_text
+            else:
+                p = ph.text_frame.add_paragraph()
+                p.text = para_text
+
+    # --- Attribution (in subtitle placeholder) ---
+    if "subtitle" in ph_map and ph_map["subtitle"] in placeholders:
+        ph = placeholders[ph_map["subtitle"]]
+        ph.text_frame.clear()
+        ph.text_frame.text = _AOC_ATTRIBUTION
+        # Make it smaller/italic
+        for para in ph.text_frame.paragraphs:
+            for run in para.runs:
+                run.font.italic = True
+                run.font.size = Pt(8)
+
+    # --- Image (Aboriginal art) ---
+    if aoc_image_data and "picture" in ph_map and ph_map["picture"] in placeholders:
+        pic_ph = placeholders[ph_map["picture"]]
+        try:
+            ext = ".png"
+            ct = aoc_image_data.get("content_type", "")
+            if "jpeg" in ct or "jpg" in ct:
+                ext = ".jpg"
+            elif "gif" in ct:
+                ext = ".gif"
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp.write(aoc_image_data["blob"])
+                tmp_path = tmp.name
+            try:
+                pic_ph.insert_picture(tmp_path)
+            finally:
+                os.unlink(tmp_path)
+        except Exception:
+            # If placeholder insert fails, add as freeform at saved position
+            try:
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    tmp.write(aoc_image_data["blob"])
+                    tmp_path = tmp.name
+                try:
+                    slide.shapes.add_picture(
+                        tmp_path,
+                        aoc_image_data["left"],
+                        aoc_image_data["top"],
+                        aoc_image_data["width"],
+                        aoc_image_data["height"],
+                    )
+                finally:
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+    elif aoc_image_data:
+        # No picture placeholder — add as freeform shape
+        try:
+            ext = ".png"
+            ct = aoc_image_data.get("content_type", "")
+            if "jpeg" in ct or "jpg" in ct:
+                ext = ".jpg"
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp.write(aoc_image_data["blob"])
+                tmp_path = tmp.name
+            try:
+                slide.shapes.add_picture(
+                    tmp_path,
+                    aoc_image_data["left"],
+                    aoc_image_data["top"],
+                    aoc_image_data["width"],
+                    aoc_image_data["height"],
+                )
+            finally:
+                os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    # Clear unused placeholders (e.g. body2 if present)
+    used_indices = set()
+    for role in ["title", "body", "subtitle", "picture"]:
+        if role in ph_map:
+            used_indices.add(ph_map[role])
+    for ph in list(slide.placeholders):
+        try:
+            idx = ph.placeholder_format.idx
+            ptype = str(ph.placeholder_format.type) if ph.placeholder_format.type else ""
+            if any(skip in ptype for skip in ['FOOTER', 'SLIDE_NUMBER', 'DATE_TIME']):
+                continue
+            if idx not in used_indices:
+                sp = ph._element
+                parent = sp.getparent()
+                if parent is not None:
+                    parent.remove(sp)
+        except (ValueError, AttributeError):
+            pass
+
+    return slide, layout_name
 
 
 # ============================================================================
@@ -1426,6 +1609,12 @@ def run_v4_pipeline(
     # Load template
     progress("create", "Creating target from template...", 0.10)
     target_prs = Presentation(template_path)
+
+    # --- Save Acknowledgement of Country slide assets before removing slides ---
+    # The AoC slide is ALWAYS the same (pre-built in template as slide 25).
+    # We extract the image now so we can recreate it perfectly later.
+    _aoc_image_data = _extract_aoc_image(target_prs)
+
     _remove_all_slides(target_prs)
 
     # Build layout lookup
@@ -1485,14 +1674,24 @@ def run_v4_pipeline(
         )
 
         try:
-            # Create slide from template layout
-            new_slide = target_prs.slides.add_slide(template_layout)
+            # --- Fixed slides: use pre-built template slide, not reconstruction ---
+            if content.slide_type == "acknowledgement":
+                new_slide, layout_name = _build_aoc_slide(
+                    target_prs, available_layouts, _aoc_image_data
+                )
+                if new_slide:
+                    result.target_layout = layout_name
+                else:
+                    raise RuntimeError("Failed to build AoC slide from template")
+            else:
+                # Create slide from template layout
+                new_slide = target_prs.slides.add_slide(template_layout)
 
-            # Inject content
-            inject_content(new_slide, content, layout_name)
+                # Inject content
+                inject_content(new_slide, content, layout_name)
 
-            # Clear unused placeholders
-            clear_unused_placeholders(new_slide, content, layout_name)
+                # Clear unused placeholders
+                clear_unused_placeholders(new_slide, content, layout_name)
 
         except Exception as e:
             result.status = "failed"
