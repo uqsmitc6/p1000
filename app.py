@@ -13,6 +13,8 @@ Deployment:
   Set ANTHROPIC_API_KEY in Streamlit Cloud secrets
 """
 
+APP_VERSION = "1.3.0"
+
 import io
 import json
 import os
@@ -131,9 +133,9 @@ st.markdown("""
 
 # ─── Header ────────────────────────────────────────────────────────────
 
-st.markdown("""
+st.markdown(f"""
 <div class="uq-header">
-    <h1>UQ Slide Compliance Tool</h1>
+    <h1>UQ Slide Compliance Tool <span style="font-size: 0.5em; opacity: 0.7; font-weight: normal;">v{APP_VERSION}</span></h1>
     <p>Brand formatting fixer &amp; image copyright audit for executive education decks</p>
 </div>
 """, unsafe_allow_html=True)
