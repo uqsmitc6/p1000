@@ -13,7 +13,7 @@ Deployment:
   Set ANTHROPIC_API_KEY in Streamlit Cloud secrets
 """
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 
 import io
 import json
@@ -145,6 +145,38 @@ st.markdown(f"""
 # ─── Sidebar (minimal — just info) ────────────────────────────────────
 
 with st.sidebar:
+    # ── v5 Dependency Diagnostic ──
+    st.markdown("### v5 Engine Status")
+    _diag_api = bool(get_api_key())
+    try:
+        import anthropic as _anth_check
+        _diag_anthropic = True
+    except ImportError:
+        _diag_anthropic = False
+    try:
+        import fitz as _fitz_check
+        _diag_fitz = True
+    except ImportError:
+        _diag_fitz = False
+    import shutil
+    _diag_libre = shutil.which("libreoffice") is not None
+
+    _checks = [
+        ("API key", _diag_api),
+        ("anthropic pkg", _diag_anthropic),
+        ("PyMuPDF (fitz)", _diag_fitz),
+        ("LibreOffice", _diag_libre),
+    ]
+    for label, ok in _checks:
+        icon = "✅" if ok else "❌"
+        st.markdown(f"{icon} {label}")
+    if all(ok for _, ok in _checks):
+        st.success("v5 AI QA ready")
+    else:
+        missing = [label for label, ok in _checks if not ok]
+        st.warning(f"v5 AI QA disabled — missing: {', '.join(missing)}")
+    st.markdown("---")
+
     st.markdown("### How to use")
     st.markdown(
         "**Brand Fixer** — Upload a `.pptx`, click the button, "
