@@ -353,7 +353,18 @@ class BrandFixer:
             for run in para.runs:
                 colour = get_run_colour(run)
                 if colour is None:
-                    continue  # Inherited from theme — leave it
+                    # Inherited from theme — normally leave it.
+                    # BUT for titles, explicitly set to UQ Purple so they
+                    # survive layout changes (otherwise they inherit whatever
+                    # the new theme defaults to, often black).
+                    if is_title and run.text.strip():
+                        run.font.color.rgb = UQ_PURPLE
+                        self.log_change(
+                            slide_idx,
+                            "colour",
+                            f"Set title colour → #51247A (was theme-inherited)",
+                        )
+                    continue
 
                 # Already an approved UQ colour? Skip.
                 if is_approved_colour(colour):
@@ -425,13 +436,15 @@ class BrandFixer:
                 is_header = row_idx == 0
                 for para in cell.text_frame.paragraphs:
                     for run in para.runs:
-                        colour = get_run_colour(run)
-                        if colour is None:
+                        if not run.text.strip():
                             continue
+                        colour = get_run_colour(run)
                         if is_header:
-                            # Header text should be white
-                            if colour != WHITE and not is_light_colour(colour):
-                                old_hex = rgb_to_hex(colour)
+                            # Header text MUST be white (purple background).
+                            # Set explicitly even if colour is None (inherited),
+                            # because inherited colours won't survive layout changes.
+                            if colour is None or (colour != WHITE and not is_light_colour(colour)):
+                                old_hex = rgb_to_hex(colour) if colour else "theme"
                                 run.font.color.rgb = WHITE
                                 self.log_change(
                                     slide_idx,
@@ -439,6 +452,8 @@ class BrandFixer:
                                     f"Table header text {old_hex} → #FFFFFF",
                                 )
                         else:
+                            if colour is None:
+                                continue  # Body rows — inherited colour is fine
                             # Body rows — dark text
                             if not is_approved_colour(colour):
                                 old_hex = rgb_to_hex(colour)

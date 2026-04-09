@@ -77,6 +77,7 @@ Analyse this image and provide a JSON response with EXACTLY these fields:
   "attribution_found": "<the attribution text found on the slide, if any, or null>",
   "is_decorative": <true if purely decorative, false if conveys specific content>,
   "content_description": "<brief description of what the image shows — useful for finding a replacement if needed>",
+  "alt_text": "<concise, accessible alt text for screen readers (max 125 characters). Describe what the image shows, not what it is. For decorative images, use empty string. For diagrams/charts, summarise the key data or relationship shown.>",
   "recommended_action": "<one of: REPLACE_IMMEDIATELY, VERIFY_LICENCE, ADD_ATTRIBUTION, CHECK_SOURCE, REVIEW_MANUALLY, NO_ACTION>"
 }
 
@@ -93,17 +94,32 @@ CLASSIFICATION GUIDE:
 - DATA_CHART: Chart, graph, or data visualisation
 - OTHER: Anything else
 
+PRIORITY GUIDE — what matters most for copyright compliance:
+Published diagrams, figures, and infographics from academic or commercial sources (DIAGRAM_PUBLISHED,
+SCREENSHOT_PUBLISHED) are HIGHER priority than decorative/atmospheric photos. A copyrighted diagram
+reproduced without permission is a clearer infringement than a generic stock photo used decoratively.
+Prioritise flagging published figures/diagrams over decorative images.
+
+GOVERNMENT & CORPORATE WEBSITE SCREENSHOTS:
+Screenshots from government (.gov, .gov.au) or corporate websites are generally acceptable for
+educational/commercial use PROVIDED they are acknowledged (attributed). They are typically published
+for public information. Classify as LOW risk if acknowledged, MEDIUM if not acknowledged.
+Do NOT classify government/corporate website screenshots as HIGH or CRITICAL unless they contain
+content that is clearly behind a paywall or subscription.
+
 RISK GUIDE:
 - CRITICAL: Visible watermark, copyright notice, or clearly identifiable commercial publication branding.
   Exception: Adobe Stock / Shutterstock / Microsoft Stock watermarks on images that also have an
   on-slide attribution are NOT critical — they are licensed. Classify as LOW.
-- HIGH: Appears from a published/commercial source with no visible watermark AND no attribution found
-  in nearby slide text. If the nearby text DOES contain an attribution mentioning Adobe Stock,
-  Shutterstock, or Microsoft Stock, downgrade to LOW.
-- MEDIUM: Professional stock photo or diagram of uncertain origin, but no attribution found.
-  If attribution IS present for a licensed provider, downgrade to LOW.
-- LOW: Licensed stock photo with proper attribution, appears original, AI-generated, UQ-branded,
-  or a simple icon.
+- HIGH: Published diagrams, figures, or infographics from academic/commercial sources with no
+  attribution or licence evidence. Also: content clearly from behind a paywall or subscription.
+  If the nearby text DOES contain an attribution mentioning Adobe Stock, Shutterstock, or
+  Microsoft Stock, downgrade to LOW.
+- MEDIUM: Professional stock photo of uncertain origin (no attribution found), or unacknowledged
+  screenshots from corporate/government websites. If attribution IS present for a licensed
+  provider, downgrade to LOW.
+- LOW: Licensed stock photo with proper attribution, acknowledged government/corporate screenshots,
+  appears original, AI-generated, UQ-branded, or a simple icon.
 - CLEAR: Clearly UQ institutional asset, simple shapes, or obviously author-created.
 
 RECOMMENDED ACTION GUIDE:
@@ -587,6 +603,7 @@ def generate_html_report(images, classifications, pptx_name, output_path, extrac
                 <div class="card-details">
                     <p class="reasoning">{cls.get('reasoning', cls.get('error', 'Classification failed'))}</p>
                     <p class="description"><strong>Content:</strong> {cls.get('content_description', 'N/A')}</p>
+                    {f'<p class="description"><strong>Suggested alt text:</strong> <em>{cls.get("alt_text", "")}</em></p>' if cls.get('alt_text') else ''}
                     {''.join(flags)}
                     <div class="card-context">
                         <small>

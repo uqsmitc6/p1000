@@ -13,7 +13,7 @@ Deployment:
   Set ANTHROPIC_API_KEY in Streamlit Cloud secrets
 """
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 import io
 import json
@@ -744,6 +744,9 @@ with tab2:
 
                             if cls.get("content_description"):
                                 st.caption(f"Content: {cls['content_description']}")
+
+                            if cls.get("alt_text"):
+                                st.caption(f"Suggested alt text: *{cls['alt_text']}*")
 
                             st.caption(f"Recommended action: **{action}**")
 
