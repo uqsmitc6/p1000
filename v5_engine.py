@@ -544,11 +544,20 @@ def run_v5_pipeline(
     qa_summary = None
     comparisons = None
 
+    if skip_ai_qa:
+        progress("qa", "AI QA skipped (skip_ai_qa=True)", 0.90)
+    elif not api_key:
+        progress("qa", "AI QA skipped — no API key provided", 0.90)
+    elif anthropic is None:
+        progress("qa", "AI QA skipped — 'anthropic' package not installed (add to requirements.txt)", 0.90)
+    elif fitz is None:
+        progress("qa", "AI QA skipped — 'PyMuPDF' package not installed (add PyMuPDF to requirements.txt)", 0.90)
+
     if not skip_ai_qa and api_key:
         if anthropic is None:
-            progress("qa", "Skipping AI QA — anthropic package not installed", 0.90)
+            pass  # Already logged above
         elif fitz is None:
-            progress("qa", "Skipping AI QA — PyMuPDF not installed", 0.90)
+            pass  # Already logged above
         else:
             # Render source slides
             progress("render", "Rendering original slides...", 0.45)

@@ -164,6 +164,7 @@ def get_slide_background_colour(slide):
         pass
 
     # 2. Check layout-level background
+    layout_bg = None
     try:
         layout = slide.slide_layout
         if layout:
@@ -172,11 +173,12 @@ def get_slide_background_colour(slide):
             if fill.type is not None:
                 fg = fill.fore_color
                 if fg and fg.type is not None:
-                    return fg.rgb
+                    layout_bg = fg.rgb
     except Exception:
         pass
 
     # 3. Check master-level background
+    master_bg = None
     try:
         layout = slide.slide_layout
         if layout and layout.slide_master:
@@ -185,20 +187,30 @@ def get_slide_background_colour(slide):
             if fill.type is not None:
                 fg = fill.fore_color
                 if fg and fg.type is not None:
-                    return fg.rgb
+                    master_bg = fg.rgb
     except Exception:
         pass
 
     # 4. Heuristic: check layout name for known dark-background layouts
+    # IMPORTANT: Many UQ template layouts (Section Divider, Cover) use
+    # decorative shapes for the purple background, not the background
+    # property — so the layout bg reads as FFFFFF even though it's
+    # visually dark. We must check layout name BEFORE returning layout_bg.
     try:
         layout_name = slide.slide_layout.name if slide.slide_layout else ""
         dark_layout_names = [
             "section divider", "cover", "dark", "purple block",
         ]
         if any(dn in layout_name.lower() for dn in dark_layout_names):
-            return RGBColor(0x51, 0x24, 0x7A)  # UQ Purple as fallback
+            return RGBColor(0x51, 0x24, 0x7A)  # UQ Purple — visual background
     except Exception:
         pass
+
+    # Return layout/master bg if found (only reached for non-dark-named layouts)
+    if layout_bg is not None:
+        return layout_bg
+    if master_bg is not None:
+        return master_bg
 
     return None
 
@@ -398,16 +410,26 @@ class BrandFixer:
                 colour = get_run_colour(run)
                 if colour is None:
                     # Inherited from theme — normally leave it.
-                    # BUT for titles, explicitly set to UQ Purple so they
+                    # BUT for titles, explicitly set colour so they
                     # survive layout changes (otherwise they inherit whatever
                     # the new theme defaults to, often black).
                     if is_title and run.text.strip():
-                        run.font.color.rgb = UQ_PURPLE
-                        self.log_change(
-                            slide_idx,
-                            "colour",
-                            f"Set title colour → #51247A (was theme-inherited)",
-                        )
+                        # On dark backgrounds, titles must be WHITE, not purple
+                        effective_bg = shape_bg or slide_bg
+                        if is_dark_colour(effective_bg) or slide_is_dark:
+                            run.font.color.rgb = WHITE
+                            self.log_change(
+                                slide_idx,
+                                "colour",
+                                f"Set title colour → #FFFFFF (dark bg, was theme-inherited)",
+                            )
+                        else:
+                            run.font.color.rgb = UQ_PURPLE
+                            self.log_change(
+                                slide_idx,
+                                "colour",
+                                f"Set title colour → #51247A (was theme-inherited)",
+                            )
                     continue
 
                 # Already an approved UQ colour? Skip.
@@ -430,7 +452,11 @@ class BrandFixer:
 
                 # Decide what to fix to
                 if is_title:
-                    new_colour = UQ_PURPLE
+                    # Titles on dark backgrounds must be white
+                    if is_dark_colour(effective_bg) or slide_is_dark:
+                        new_colour = WHITE
+                    else:
+                        new_colour = UQ_PURPLE
                 elif is_dark_colour(effective_bg) or slide_is_dark:
                     new_colour = WHITE
                 else:
