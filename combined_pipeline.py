@@ -28,11 +28,14 @@ from brand_fixer import BrandFixer
 from ref_checker import RefChecker
 from image_audit import extract_images, classify_image, generate_html_report
 from layout_manager import LayoutManager
+from v4_engine import run_v4_pipeline
+from v5_engine import run_v5_pipeline
 
 
 def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
                  skip_image_audit=False, skip_layout=True,
-                 skip_layout_vision=False, progress_callback=None):
+                 skip_layout_vision=False, layout_engine="v4",
+                 progress_callback=None):
     """Run the full compliance pipeline on a PPTX file.
 
     Args:
@@ -43,6 +46,7 @@ def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
         skip_image_audit: If True, skip image audit entirely
         skip_layout: If True, skip layout auto-apply entirely
         skip_layout_vision: If True, use name-mapping only (no Vision calls)
+        layout_engine: "v4" (content extraction + injection) or "v2" (legacy recipe)
         progress_callback: Optional callable(percent, message) for progress updates
 
     Returns:
@@ -53,6 +57,7 @@ def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
             image_report: Image audit report dict (or None if skipped)
             image_html: Self-contained HTML report string (or None)
             layout_report: Layout auto-apply report dict (or None if skipped)
+            design_report: Design analysis flags (or None if skipped)
             summary: Unified summary dict
     """
     def progress(pct, msg):
@@ -60,55 +65,164 @@ def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
             progress_callback(pct, msg)
 
     layout_report = None
+    design_report = None
+    qa_report = None
 
     # ── Step 0: Layout Auto-Apply ────────────────────────────────────
     if not skip_layout:
         progress(0, "Step 0/3: Applying UQ template layouts...")
 
+        qa_report = None
+
         try:
-            lm = LayoutManager(api_key=api_key)
+            if layout_engine == "v5":
+                # ── v5 Engine: v4 + Auto-fit + AI QA ──
+                template_path = str(Path(__file__).parent / "uq_template.pptx")
 
-            def layout_progress(step, detail, layout_pct):
-                # Map layout progress (0-1) to pipeline progress (0-20%)
-                mapped_pct = int(layout_pct * 20)
-                progress(mapped_pct, f"Layout: {detail}")
+                def v5_progress(step, detail, layout_pct):
+                    mapped_pct = int(layout_pct * 20)
+                    progress(mapped_pct, f"Layout: {detail}")
 
-            layout_result = lm.run_pipeline(
-                pptx_bytes,
-                progress_callback=layout_progress,
-                skip_vision=skip_layout_vision,
-                skip_verification=skip_layout_vision,  # Skip verification if no Vision
-            )
+                v5_result = run_v5_pipeline(
+                    source_pptx_bytes=pptx_bytes,
+                    template_path=template_path,
+                    api_key=api_key,
+                    skip_ai_qa=(api_key is None),
+                    progress_callback=v5_progress,
+                )
 
-            # Use the rebuilt PPTX as input for subsequent steps
-            pptx_bytes = layout_result["output_pptx_bytes"]
+                pptx_bytes = v5_result["output_pptx_bytes"]
+                design_report = v5_result.get("design_report")
+                qa_report = {
+                    "qa_results": v5_result.get("qa_results"),
+                    "qa_summary": v5_result.get("qa_summary"),
+                    "comparisons": v5_result.get("comparisons"),
+                    "cost": v5_result.get("cost"),
+                }
 
-            layout_report = {
-                "total_slides": layout_result["summary"]["total_slides"],
-                "rebuilt": layout_result["summary"]["rebuilt"],
-                "failed": layout_result["summary"]["failed"],
-                "low_confidence": layout_result["summary"]["low_confidence"],
-                "cost_usd": layout_result["summary"]["total_cost_usd"],
-                "tokens": {
-                    "input": layout_result["summary"]["total_input_tokens"],
-                    "output": layout_result["summary"]["total_output_tokens"],
-                },
-                "results": [
-                    {
-                        "slide": r.slide_number,
-                        "from": r.original_layout,
-                        "to": r.recommended_layout,
-                        "confidence": r.confidence,
-                        "status": r.status,
-                        "changed": r.original_layout != r.recommended_layout,
-                    }
-                    for r in layout_result["results"]
-                ],
-            }
+                v4s = v5_result["v4_summary"]
+                layout_report = {
+                    "total_slides": v4s["total_slides"],
+                    "rebuilt": v4s["success"],
+                    "failed": v4s["failed"],
+                    "low_confidence": 0,
+                    "cost_usd": v5_result["cost"]["total_usd"],
+                    "tokens": {
+                        "input": v5_result["cost"]["input_tokens"],
+                        "output": v5_result["cost"]["output_tokens"],
+                    },
+                    "flagged_for_review": v4s["flagged_for_review"],
+                    "slide_types": v4s["slide_types"],
+                    "results": [
+                        {
+                            "slide": r.slide_number,
+                            "from": r.source_layout,
+                            "to": r.target_layout,
+                            "type": r.slide_type,
+                            "confidence": 1.0,
+                            "status": r.status,
+                            "changed": True,
+                            "design_flags": r.design_flags,
+                        }
+                        for r in v5_result["v4_results"]
+                    ],
+                }
 
-            changed = sum(1 for r in layout_result["results"]
-                         if r.original_layout != r.recommended_layout)
-            progress(20, f"Layout: {layout_result['summary']['rebuilt']} rebuilt, {changed} layouts changed")
+                qa_sum = v5_result.get("qa_summary")
+                qa_msg = ""
+                if qa_sum:
+                    qa_msg = (f", QA: {qa_sum['auto_approved']} approved, "
+                              f"{qa_sum['needs_review']} review, "
+                              f"${qa_sum['total_cost_usd']:.2f}")
+                progress(20, f"Layout v5: {v4s['success']} rebuilt{qa_msg}")
+
+            elif layout_engine == "v4":
+                # ── v4 Engine: Content Extraction + Placeholder Injection ──
+                template_path = str(Path(__file__).parent / "uq_template.pptx")
+
+                def v4_progress(step, detail, layout_pct):
+                    mapped_pct = int(layout_pct * 20)
+                    progress(mapped_pct, f"Layout: {detail}")
+
+                v4_result = run_v4_pipeline(
+                    source_pptx_bytes=pptx_bytes,
+                    template_path=template_path,
+                    progress_callback=v4_progress,
+                )
+
+                pptx_bytes = v4_result["output_pptx_bytes"]
+                design_report = v4_result.get("design_report")
+
+                layout_report = {
+                    "total_slides": v4_result["summary"]["total_slides"],
+                    "rebuilt": v4_result["summary"]["success"],
+                    "failed": v4_result["summary"]["failed"],
+                    "low_confidence": 0,
+                    "cost_usd": 0,
+                    "tokens": {"input": 0, "output": 0},
+                    "flagged_for_review": v4_result["summary"]["flagged_for_review"],
+                    "slide_types": v4_result["summary"]["slide_types"],
+                    "results": [
+                        {
+                            "slide": r.slide_number,
+                            "from": r.source_layout,
+                            "to": r.target_layout,
+                            "type": r.slide_type,
+                            "confidence": 1.0,
+                            "status": r.status,
+                            "changed": True,
+                            "design_flags": r.design_flags,
+                        }
+                        for r in v4_result["results"]
+                    ],
+                }
+
+                progress(20, f"Layout v4: {v4_result['summary']['success']} rebuilt, "
+                             f"{v4_result['summary']['flagged_for_review']} flagged")
+
+            else:
+                # ── Legacy v2 Engine: Recipe-based ──
+                lm = LayoutManager(api_key=api_key)
+
+                def layout_progress(step, detail, layout_pct):
+                    mapped_pct = int(layout_pct * 20)
+                    progress(mapped_pct, f"Layout: {detail}")
+
+                layout_result = lm.run_pipeline(
+                    pptx_bytes,
+                    progress_callback=layout_progress,
+                    skip_vision=skip_layout_vision,
+                    skip_verification=skip_layout_vision,
+                )
+
+                pptx_bytes = layout_result["output_pptx_bytes"]
+
+                layout_report = {
+                    "total_slides": layout_result["summary"]["total_slides"],
+                    "rebuilt": layout_result["summary"]["rebuilt"],
+                    "failed": layout_result["summary"]["failed"],
+                    "low_confidence": layout_result["summary"]["low_confidence"],
+                    "cost_usd": layout_result["summary"]["total_cost_usd"],
+                    "tokens": {
+                        "input": layout_result["summary"]["total_input_tokens"],
+                        "output": layout_result["summary"]["total_output_tokens"],
+                    },
+                    "results": [
+                        {
+                            "slide": r.slide_number,
+                            "from": r.original_layout,
+                            "to": r.recommended_layout,
+                            "confidence": r.confidence,
+                            "status": r.status,
+                            "changed": r.original_layout != r.recommended_layout,
+                        }
+                        for r in layout_result["results"]
+                    ],
+                }
+
+                changed = sum(1 for r in layout_result["results"]
+                             if r.original_layout != r.recommended_layout)
+                progress(20, f"Layout v2: {layout_result['summary']['rebuilt']} rebuilt, {changed} changed")
 
         except Exception as e:
             layout_report = {"error": str(e)}
@@ -332,5 +446,7 @@ def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
         "image_html": image_html,
         "image_data": image_data,
         "layout_report": layout_report,
+        "design_report": design_report,
+        "qa_report": qa_report,
         "summary": summary,
     }

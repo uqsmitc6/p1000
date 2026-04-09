@@ -13,7 +13,7 @@ Deployment:
   Set ANTHROPIC_API_KEY in Streamlit Cloud secrets
 """
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "2.0.0"
 
 import io
 import json
@@ -1136,12 +1136,18 @@ with tab4:
             )
         with col_opt3:
             combo_layout_mode = st.selectbox(
-                "Layout auto-apply (beta)",
-                options=["Skip", "Name mapping (fast, free)", "AI Vision (uses API)"],
+                "Template reformat",
+                options=[
+                    "v5 — Smart reformat + AI QA (recommended, uses API)",
+                    "v4 — Smart reformat (free, no AI)",
+                    "Skip",
+                    "v2 — Legacy recipe engine",
+                ],
                 index=0,
                 key="combo_layout_mode",
-                help="Skip: don't apply layouts (default — existing behaviour). "
-                     "Name mapping: match layouts by name and rebuild slides from UQ template (fast, free). "
+                help="v5: v4 + auto-fit + Claude Vision QA per slide (~$0.05/slide). "
+                     "v4: Extracts content and injects into new template (free). "
+                     "Skip: don't apply layouts. v2: Legacy recipe-based engine. "
                      "AI Vision: Claude analyses each slide image for best layout (most accurate, uses API credits).",
             )
 
@@ -1164,16 +1170,27 @@ with tab4:
 
             try:
                 skip_layout = combo_layout_mode == "Skip"
-                skip_layout_vision = combo_layout_mode != "AI Vision (uses API)"
+                if "v5" in combo_layout_mode:
+                    layout_engine = "v5"
+                elif "v4" in combo_layout_mode:
+                    layout_engine = "v4"
+                else:
+                    layout_engine = "v2"
+                skip_layout_vision = True
+
+                # v5 needs API key for QA; also pass if image audit needs it
+                needs_api = (layout_engine == "v5") or (not combo_skip_images)
+                effective_api_key = api_key if needs_api else None
 
                 results = run_pipeline(
                     pptx_bytes=combo_file.getvalue(),
                     filename=combo_file.name,
-                    api_key=api_key if (not combo_skip_images or not skip_layout_vision) else None,
+                    api_key=effective_api_key,
                     image_limit=combo_img_limit if combo_img_limit > 0 else None,
                     skip_image_audit=combo_skip_images,
                     skip_layout=skip_layout,
                     skip_layout_vision=skip_layout_vision,
+                    layout_engine=layout_engine,
                     progress_callback=combo_progress,
                 )
 
@@ -1213,6 +1230,8 @@ with tab4:
                     "image_html": results["image_html"],
                     "image_data": results["image_data"],
                     "layout_report": results.get("layout_report"),
+                    "design_report": results.get("design_report"),
+                    "qa_report": results.get("qa_report"),
                     "summary": results["summary"],
                     "source_name": combo_file.name,
                     "fixed_name": combo_file.name.replace(".pptx", "_COMPLIANT.pptx"),
@@ -1395,6 +1414,134 @@ with tab4:
                                 f"(confidence: {conf})</div>",
                                 unsafe_allow_html=True,
                             )
+
+            # ── Design Analysis Report ──
+            design_report = cr.get("design_report")
+            if design_report:
+                st.markdown("---")
+                with st.expander(
+                    f"🔍 Design Analysis — {len(design_report)} slides flagged for review",
+                    expanded=len(design_report) > 0,
+                ):
+                    if not design_report:
+                        st.success("No design issues detected!", icon="✅")
+                    else:
+                        for item in design_report:
+                            slide_num = item["slide"]
+                            slide_type = item.get("type", "unknown")
+                            flags = item.get("flags", [])
+                            for flag in flags:
+                                # Colour-code by severity
+                                if flag.startswith("OVERSET"):
+                                    st.markdown(
+                                        f"<div class='change-item' style='border-left-color:#E62645;'>"
+                                        f"<strong>Slide {slide_num}</strong> ({slide_type}): {flag}</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                elif flag.startswith("DENSE") or flag.startswith("IMG_TEXT"):
+                                    st.markdown(
+                                        f"<div class='change-item' style='border-left-color:#D97706;'>"
+                                        f"<strong>Slide {slide_num}</strong> ({slide_type}): {flag}</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                else:
+                                    st.markdown(
+                                        f"<div class='change-item' style='border-left-color:#4085C6;'>"
+                                        f"<strong>Slide {slide_num}</strong> ({slide_type}): {flag}</div>",
+                                        unsafe_allow_html=True,
+                                    )
+
+            # ── AI Quality Assessment (v5) ──
+            qa_report = cr.get("qa_report")
+            if qa_report and qa_report.get("qa_summary"):
+                qs = qa_report["qa_summary"]
+                st.markdown("---")
+                with st.expander(
+                    f"🤖 AI Quality Assessment — "
+                    f"{qs['auto_approved']} approved, "
+                    f"{qs['needs_review']} review, "
+                    f"{qs['needs_manual_fix']} fix "
+                    f"(avg score: {qs['average_quality_score']}/10, "
+                    f"${qs['total_cost_usd']:.2f})",
+                    expanded=True,
+                ):
+                    # Summary stats
+                    qcols = st.columns(5)
+                    qa_stats = [
+                        ("Approved", qs["auto_approved"], "#16A34A"),
+                        ("Review", qs["needs_review"], "#D97706"),
+                        ("Fix", qs["needs_manual_fix"], "#E62645"),
+                        ("Overflow", qs["text_overflow_count"], "#962A8B"),
+                        ("Avg Score", f"{qs['average_quality_score']}/10", "#4085C6"),
+                    ]
+                    for col, (label, val, colour) in zip(qcols, qa_stats):
+                        col.markdown(
+                            f"<div class='stat-card'>"
+                            f"<div class='number' style='color:{colour};'>{val}</div>"
+                            f"<div class='label'>{label}</div></div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    # Before/after comparisons
+                    comparisons = qa_report.get("comparisons", [])
+                    qa_results_list = qa_report.get("qa_results", [])
+
+                    if comparisons:
+                        st.markdown("### Slide-by-slide review")
+
+                        # Filter controls
+                        qa_filter = st.radio(
+                            "Show:",
+                            ["All", "Needs review", "Needs fix", "Overflow"],
+                            horizontal=True, key="qa_filter",
+                        )
+
+                        for comp in comparisons:
+                            # Apply filter
+                            if qa_filter == "Needs review" and comp["recommendation"] != "needs_review":
+                                continue
+                            if qa_filter == "Needs fix" and comp["recommendation"] != "needs_manual_fix":
+                                continue
+                            if qa_filter == "Overflow" and not comp.get("text_overflow"):
+                                continue
+
+                            rec = comp["recommendation"]
+                            icon = {"auto_approve": "✅", "needs_review": "⚠️",
+                                    "needs_manual_fix": "❌"}.get(rec, "?")
+                            score = comp.get("quality_score", "?")
+
+                            with st.expander(
+                                f"{icon} Slide {comp['slide_number']} — "
+                                f"{comp['slide_type']} → {comp['target_layout']} "
+                                f"(score: {score}/10)",
+                                expanded=(rec != "auto_approve"),
+                            ):
+                                # Before/after images side by side
+                                img_cols = st.columns(2)
+                                with img_cols[0]:
+                                    st.caption("**Original**")
+                                    st.image(
+                                        f"data:image/png;base64,{comp['original_b64']}",
+                                        use_container_width=True,
+                                    )
+                                with img_cols[1]:
+                                    st.caption("**Reformatted**")
+                                    st.image(
+                                        f"data:image/png;base64,{comp['reformatted_b64']}",
+                                        use_container_width=True,
+                                    )
+
+                                # AI assessment
+                                st.markdown(f"**AI assessment:** {comp.get('summary', '')}")
+
+                                if comp.get("missing_content"):
+                                    st.warning(f"Missing content: {comp['missing_content']}")
+                                if comp.get("text_overflow"):
+                                    st.error("Text overflow detected")
+                                if comp.get("fix_suggestions"):
+                                    st.markdown("**Suggestions:**")
+                                    for sug in comp["fix_suggestions"]:
+                                        st.markdown(f"- {sug}")
 
             # ── Brand Fixer Details ──
             st.markdown("---")
