@@ -715,13 +715,24 @@ def select_layout(content: SlideContent, available_layouts: Dict[str, Any]) -> s
         "cover", "thank_you", "section_divider", "references",
         "acknowledgement", "quote",
     }
+    # Restrictive layouts that should NEVER override the type-based selection
+    # when the slide has body content — these layouts lack body placeholders
+    # and would cause content loss.
+    RESTRICTIVE_LAYOUTS = {
+        "Title Only", "Blank Branded", "Icons & Text", "Process Diagram",
+        "Image collage", "Three Pullouts", "Multi-layout 1", "Multi-layout 2",
+    }
     if content.slide_type not in TYPE_PRIORITY_OVERRIDES:
         source_name = content.source_layout_name
         mapped = _map_source_layout(source_name)
         if mapped and mapped in available_layouts:
             # Use mapped name if it's a better match than the generic type default
             if mapped != "Title and Content":  # Don't override with the generic fallback
-                preferred = mapped
+                # Don't override to a restrictive layout if the slide has body content
+                if mapped in RESTRICTIVE_LAYOUTS and content.body_blocks:
+                    pass  # Keep the type-based selection
+                else:
+                    preferred = mapped
 
     # Validate layout exists in template
     if preferred not in available_layouts:

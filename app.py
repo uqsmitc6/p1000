@@ -1152,12 +1152,20 @@ with tab4:
             )
 
         if st.button("Run Full Compliance Check", type="primary", key="run_combo"):
-            # Validate API key if image audit is included
+            # Validate API key if needed (image audit OR v5 AI QA)
             api_key = get_api_key()
-            if not combo_skip_images and not api_key:
+            _needs_key_for_images = not combo_skip_images
+            _needs_key_for_v5 = "v5" in combo_layout_mode
+            if (_needs_key_for_images or _needs_key_for_v5) and not api_key:
+                _reason = []
+                if _needs_key_for_v5:
+                    _reason.append("v5 AI QA")
+                if _needs_key_for_images:
+                    _reason.append("image audit")
                 st.error(
-                    "The API key hasn't been configured yet. "
-                    "Ask Sean to set it up, or tick 'Skip image audit' to run brand + refs only."
+                    f"An Anthropic API key is required for {' and '.join(_reason)}. "
+                    "Ask Sean to set it up in Streamlit secrets, "
+                    "or switch to v4 / tick 'Skip image audit' to run without API calls."
                 )
                 st.stop()
 

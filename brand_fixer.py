@@ -146,7 +146,13 @@ def get_shape_background_colour(shape):
 
 
 def get_slide_background_colour(slide):
-    """Try to determine the slide's background colour."""
+    """Try to determine the slide's background colour.
+
+    Checks in order: slide background → layout background → master background.
+    This is critical for layouts like Section Divider that inherit a dark
+    background from the layout/master rather than defining it at slide level.
+    """
+    # 1. Check slide-level background
     try:
         bg = slide.background
         fill = bg.fill
@@ -156,6 +162,44 @@ def get_slide_background_colour(slide):
                 return fg.rgb
     except Exception:
         pass
+
+    # 2. Check layout-level background
+    try:
+        layout = slide.slide_layout
+        if layout:
+            bg = layout.background
+            fill = bg.fill
+            if fill.type is not None:
+                fg = fill.fore_color
+                if fg and fg.type is not None:
+                    return fg.rgb
+    except Exception:
+        pass
+
+    # 3. Check master-level background
+    try:
+        layout = slide.slide_layout
+        if layout and layout.slide_master:
+            bg = layout.slide_master.background
+            fill = bg.fill
+            if fill.type is not None:
+                fg = fill.fore_color
+                if fg and fg.type is not None:
+                    return fg.rgb
+    except Exception:
+        pass
+
+    # 4. Heuristic: check layout name for known dark-background layouts
+    try:
+        layout_name = slide.slide_layout.name if slide.slide_layout else ""
+        dark_layout_names = [
+            "section divider", "cover", "dark", "purple block",
+        ]
+        if any(dn in layout_name.lower() for dn in dark_layout_names):
+            return RGBColor(0x51, 0x24, 0x7A)  # UQ Purple as fallback
+    except Exception:
+        pass
+
     return None
 
 
