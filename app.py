@@ -13,7 +13,7 @@ Deployment:
   Set ANTHROPIC_API_KEY in Streamlit Cloud secrets
 """
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 import io
 import json
