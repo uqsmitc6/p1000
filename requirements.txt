@@ -3,3 +3,5 @@ Pillow
 anthropic
 streamlit
 lxml
+gspread
+google-auth

@@ -13,7 +13,7 @@ Deployment:
   Set ANTHROPIC_API_KEY in Streamlit Cloud secrets
 """
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 import io
 import json
@@ -34,6 +34,7 @@ from brand_fixer import BrandFixer
 from image_audit import extract_images, classify_image, generate_html_report
 from ref_checker import RefChecker
 from combined_pipeline import run_pipeline
+from cost_logger import log_cost, render_sidebar_admin
 
 
 # ─── API Key from secrets ──────────────────────────────────────────────
@@ -183,6 +184,9 @@ with st.sidebar:
         "Learning Design Team</small>",
         unsafe_allow_html=True,
     )
+
+    st.markdown("---")
+    render_sidebar_admin()
 
 
 # ─── Main Tabs ─────────────────────────────────────────────────────────
@@ -554,6 +558,29 @@ with tab2:
                             for img, cls in zip(images, classifications)
                         ],
                     }
+
+                    # Calculate cost and log
+                    from image_audit import COST_PER_M_INPUT, COST_PER_M_OUTPUT
+                    total_input_tokens = sum(
+                        c.get("api_tokens_used", {}).get("input", 0)
+                        for c in classifications
+                    )
+                    total_output_tokens = sum(
+                        c.get("api_tokens_used", {}).get("output", 0)
+                        for c in classifications
+                    )
+                    cost_usd = (
+                        (total_input_tokens / 1_000_000) * COST_PER_M_INPUT
+                        + (total_output_tokens / 1_000_000) * COST_PER_M_OUTPUT
+                    )
+                    log_cost(
+                        tool="Image Audit",
+                        filename=audit_file.name,
+                        num_images=len(images),
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        cost_usd=cost_usd,
+                    )
 
                     # Store in session state
                     st.session_state["audit_result"] = {
@@ -1136,6 +1163,18 @@ with tab4:
 
                 progress_bar.progress(1.0)
                 status_text.empty()
+
+                # Log cost if image audit ran
+                ir = results["image_report"]
+                if ir and ir.get("cost_usd"):
+                    log_cost(
+                        tool="Full Compliance Check",
+                        filename=combo_file.name,
+                        num_images=ir.get("total_images", 0),
+                        input_tokens=ir.get("tokens", {}).get("input", 0),
+                        output_tokens=ir.get("tokens", {}).get("output", 0),
+                        cost_usd=ir["cost_usd"],
+                    )
 
                 # Store in session state
                 st.session_state["combo_result"] = {

@@ -169,11 +169,31 @@ def run_pipeline(pptx_bytes, filename, api_key=None, image_limit=None,
                         if "error" not in cls:
                             risk_counts[cls.get("risk_level", "UNKNOWN")] += 1
 
+                    # Calculate cost
+                    from image_audit import COST_PER_M_INPUT, COST_PER_M_OUTPUT
+                    total_input_tokens = sum(
+                        c.get("api_tokens_used", {}).get("input", 0)
+                        for c in classifications
+                    )
+                    total_output_tokens = sum(
+                        c.get("api_tokens_used", {}).get("output", 0)
+                        for c in classifications
+                    )
+                    cost_usd = (
+                        (total_input_tokens / 1_000_000) * COST_PER_M_INPUT
+                        + (total_output_tokens / 1_000_000) * COST_PER_M_OUTPUT
+                    )
+
                     image_report = {
                         "total_images": total_images,
                         "risk_counts": dict(risk_counts),
                         "classifications": classifications,
                         "images": images_clean,
+                        "cost_usd": round(cost_usd, 4),
+                        "tokens": {
+                            "input": total_input_tokens,
+                            "output": total_output_tokens,
+                        },
                     }
 
                     # Build JSON data for download
